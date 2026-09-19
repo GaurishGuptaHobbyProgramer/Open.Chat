@@ -59,9 +59,33 @@ function escapeHTML(str) {
     });
 }
 
+function formatDeviceTimestamp(value) {
+    if (!value) {
+        const now = new Date();
+        return `${String(now.getDate()).padStart(2, "0")}/${String(now.getMonth() + 1).padStart(2, "0")}/${now.getFullYear()}, ${String(now.getHours() % 12 || 12).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")} ${now.getHours() >= 12 ? "PM" : "AM"}`;
+    }
+
+    const dateValue = typeof value === "string" ? value.replace(" ", "T") : value;
+    const parsedDate = new Date(dateValue);
+    if (Number.isNaN(parsedDate.getTime())) {
+        return value;
+    }
+
+    const day = String(parsedDate.getDate()).padStart(2, "0");
+    const month = String(parsedDate.getMonth() + 1).padStart(2, "0");
+    const year = parsedDate.getFullYear();
+    let hours = parsedDate.getHours();
+    const minutes = String(parsedDate.getMinutes()).padStart(2, "0");
+    const suffix = hours >= 12 ? "PM" : "AM";
+    hours = hours % 12 || 12;
+
+    return `${day}/${month}/${year}, ${String(hours).padStart(2, "0")}:${minutes} ${suffix}`;
+}
+
 function appendMessage(data, isOwnMessage = false) {
     const safeUsername = data.username || "Unknown";
     const initials = safeUsername.split(" ").pop().slice(0, 2).toUpperCase() || "?";
+    const timestamp = formatDeviceTimestamp(data.created_at || data.time || new Date());
     const messageElement = document.createElement("div");
     messageElement.className = `message ${isOwnMessage ? "own" : ""}`;
 
@@ -70,7 +94,7 @@ function appendMessage(data, isOwnMessage = false) {
         <div class="message-content">
             <div class="message-header">
                 <b>${escapeHTML(safeUsername)}</b>
-                <span>${escapeHTML(data.time || "Now")}</span>
+                <span>${escapeHTML(timestamp)}</span>
             </div>
             <div class="message-body">${escapeHTML(data.message || "")}</div>
         </div>

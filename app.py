@@ -44,9 +44,9 @@ def close_db(error):
 
 def format_message_time(value):
     try:
-        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").strftime("%I:%M %p")
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").strftime("%d/%m/%Y, %I:%M %p")
     except (TypeError, ValueError):
-        return datetime.now().strftime("%I:%M %p")
+        return datetime.now().strftime("%d/%m/%Y, %I:%M %p")
 
 
 def save_message(username, message):
@@ -68,6 +68,7 @@ def save_message(username, message):
         "id": cursor.lastrowid,
         "username": clean_username,
         "message": clean_message,
+        "created_at": timestamp,
         "time": format_message_time(timestamp),
     }
 
@@ -90,6 +91,7 @@ def get_messages(limit=250, since_id=None):
             "id": row["id"],
             "username": row["username"],
             "message": row["message"],
+            "created_at": row["created_at"],
             "time": format_message_time(row["created_at"]),
         }
         for row in rows

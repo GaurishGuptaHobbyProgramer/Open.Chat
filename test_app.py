@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 
-from app import create_app, get_messages, save_message
+from app import create_app, format_message_time, get_messages, save_message
 
 
 class ChatDatabaseTest(unittest.TestCase):
@@ -27,6 +27,9 @@ class ChatDatabaseTest(unittest.TestCase):
             self.assertEqual(messages[0]["message"], "Hello there")
             self.assertEqual(messages[1]["username"], "Bob")
             self.assertEqual(messages[1]["message"], "Hi Alice")
+
+    def test_message_time_format(self):
+        self.assertEqual("02/01/2025, 08:05 AM", format_message_time("2025-01-02 08:05:00"))
 
 
 if __name__ == "__main__":
