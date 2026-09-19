@@ -1,114 +1,223 @@
 const randomID = Math.floor(Math.random() * 9000) + 1000;
-const username = "Anonymous " + randomID;
-const socket = io();
+const storedUser = localStorage.getItem("openchat-username");
+const storedToken = localStorage.getItem("openchat-user-token") || (
+    (typeof crypto !== "undefined" && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `client-${Date.now()}-${randomID}`
+);
+const userToken = storedToken;
 
+localStorage.setItem("openchat-user-token", userToken);
+
+const usernameInput = document.getElementById("username-input");
+let username = storedUser || `Anonymous ${randomID}`;
+
+const messageForm = document.getElementById("message-form");
 const messageInput = document.getElementById("message-input");
-const sendButton = document.getElementById("send-button");
 const chatBox = document.getElementById("chat-box");
 const onlineUsers = document.getElementById("online-users");
-const themeToggle = document.getElementById('theme-toggle');
+const themeToggle = document.getElementById("theme-toggle");
 
-function applyTheme(theme){
-    document.documentElement.classList.remove('light-theme','dark-theme');
-    document.documentElement.classList.add(theme === 'light' ? 'light-theme' : 'dark-theme');
-    if(themeToggle) themeToggle.setAttribute('aria-pressed', theme === 'light' ? 'true' : 'false');
-}
-
-// Initialize theme from localStorage or system preference
-const saved = localStorage.getItem('openchat-theme');
-if(saved){
-    applyTheme(saved);
-} else {
-    const prefersLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
-    applyTheme(prefersLight ? 'light' : 'dark');
-}
-
-if(themeToggle){
-    themeToggle.addEventListener('click', ()=>{
-        const isLight = document.documentElement.classList.contains('light-theme');
-        const next = isLight ? 'dark' : 'light';
-        applyTheme(next);
-        localStorage.setItem('openchat-theme', next);
+if (usernameInput) {
+    usernameInput.value = username;
+    usernameInput.addEventListener("input", () => {
+        username = usernameInput.value.trim() || `Anonymous ${randomID}`;
+        localStorage.setItem("openchat-username", username);
     });
 }
 
-function escapeHTML(str){
-    if(!str) return "";
-    return str.replace(/[&<>"']/g, function(tag){
-        const chars = {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"};
+function applyTheme(theme) {
+    document.documentElement.classList.remove("light-theme", "dark-theme");
+    document.documentElement.classList.add(theme === "light" ? "light-theme" : "dark-theme");
+    if (themeToggle) {
+        themeToggle.setAttribute("aria-pressed", theme === "light" ? "true" : "false");
+    }
+}
+
+const savedTheme = localStorage.getItem("openchat-theme");
+if (savedTheme) {
+    applyTheme(savedTheme);
+} else {
+    const prefersLight = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
+    applyTheme(prefersLight ? "light" : "dark");
+}
+
+if (themeToggle) {
+    themeToggle.addEventListener("click", () => {
+        const isLight = document.documentElement.classList.contains("light-theme");
+        const nextTheme = isLight ? "dark" : "light";
+        applyTheme(nextTheme);
+        localStorage.setItem("openchat-theme", nextTheme);
+    });
+}
+
+function escapeHTML(str) {
+    if (!str) return "";
+    return String(str).replace(/[&<>"']/g, (tag) => {
+        const chars = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
         return chars[tag] || tag;
     });
 }
 
-sendButton.addEventListener("click", function () {
-    const message = messageInput.value;
+function appendMessage(data, isOwnMessage = false) {
+    const safeUsername = data.username || "Unknown";
+    const initials = safeUsername.split(" ").pop().slice(0, 2).toUpperCase() || "?";
+    const messageElement = document.createElement("div");
+    messageElement.className = `message ${isOwnMessage ? "own" : ""}`;
 
-    if (message.trim() === "") return;
-
-    // render immediately for a snappy UI
-    const now = new Date();
-    const timeStr = now.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-    appendMessage({username, message, time: timeStr}, true);
-
-    socket.send({ username: username, message: message });
-    messageInput.value = "";
-});
-
-messageInput.addEventListener("keypress", function(event) {
-    if (event.key === "Enter") {
-        event.preventDefault();
-        sendButton.click();
-    }
-});
-
-socket.on("message", function(data) {
-    appendMessage(data, data.username === username);
-});
-
-function appendMessage(data, isLocal){
-    const isOwn = data.username === username;
-    const initials = (data.username || "?").split(' ').slice(-1)[0].slice(0,2).toUpperCase();
-    const msgHTML = `
-        <div class="message ${isOwn ? 'own' : ''}">
-            <div class="avatar">${escapeHTML(initials)}</div>
-            <div class="message-content">
-                <div class="message-header">
-                    <b>${escapeHTML(data.username)}</b>
-                    <span>${escapeHTML(data.time)}</span>
-                </div>
-                <div class="message-body">${escapeHTML(data.message)}</div>
+    messageElement.innerHTML = `
+        <div class="avatar">${escapeHTML(initials)}</div>
+        <div class="message-content">
+            <div class="message-header">
+                <b>${escapeHTML(safeUsername)}</b>
+                <span>${escapeHTML(data.time || "Now")}</span>
             </div>
+            <div class="message-body">${escapeHTML(data.message || "")}</div>
         </div>
     `;
 
-    // avoid duplicating the local optimistic message if server echoes the same content
-    if(isLocal){
-        chatBox.insertAdjacentHTML('beforeend', msgHTML);
-    } else {
-        // simple duplication check: skip if last message content is identical and last author same
-        const last = chatBox.lastElementChild;
-        if(last && last.querySelector('.message-body') && last.querySelector('b') &&
-           last.querySelector('b').textContent === data.username &&
-           last.querySelector('.message-body').textContent === data.message){
-            // already displayed via optimistic render
-        } else {
-            chatBox.insertAdjacentHTML('beforeend', msgHTML);
-        }
-    }
-
+    chatBox.appendChild(messageElement);
     chatBox.scrollTop = chatBox.scrollHeight;
 }
 
-// connection error handling
-socket.on('connect_error', (err)=>{
-    console.error('Socket connection error:', err);
+let lastRenderedSignature = "";
+let lastMessageId = null;
+let pollingTimer = null;
+
+function renderHistory(messages) {
+    const nextSignature = JSON.stringify(messages || []);
+    if (nextSignature === lastRenderedSignature) {
+        return;
+    }
+
+    lastRenderedSignature = nextSignature;
+    chatBox.innerHTML = "";
+    messages.forEach((message) => {
+        appendMessage(message, message.username === username);
+    });
+    if (messages.length) {
+        lastMessageId = Math.max(...messages.map((message) => Number(message.id) || 0));
+    }
+    chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+function appendIncomingMessages(messages) {
+    if (!messages.length) return;
+
+    let highestId = lastMessageId || 0;
+    messages.forEach((message) => {
+        const messageId = Number(message.id) || 0;
+        if (messageId <= highestId) return;
+
+        appendMessage(message, message.username === username);
+        highestId = messageId;
+    });
+
+    lastMessageId = highestId;
+    chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+async function loadMessages() {
+    try {
+        const url = lastMessageId ? `/messages?since_id=${lastMessageId}` : "/messages?limit=80";
+        const response = await fetch(url, { cache: "no-store" });
+        const messages = await response.json();
+
+        if (!messages.length) {
+            return;
+        }
+
+        if (lastMessageId === null) {
+            renderHistory(messages);
+        } else {
+            appendIncomingMessages(messages);
+        }
+    } catch (error) {
+        console.error("Failed to load messages:", error);
+    }
+}
+
+async function updatePresence() {
+    try {
+        const response = await fetch("/presence", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ token: userToken }),
+            cache: "no-store"
+        });
+        const data = await response.json();
+        if (onlineUsers) {
+            onlineUsers.textContent = data.count === 1 ? "🟢 1 online" : `🟢 ${data.count} online`;
+        }
+    } catch (error) {
+        console.error("Failed to update presence:", error);
+    }
+}
+
+async function sendMessage(message) {
+    if (!message) return;
+
+    const response = await fetch("/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, message }),
+        cache: "no-store"
+    });
+
+    if (!response.ok) {
+        throw new Error("Send failed");
+    }
+
+    const payload = await response.json();
+    appendMessage(payload, true);
+    lastMessageId = Math.max(lastMessageId || 0, Number(payload.id) || 0);
+}
+
+if (messageForm) {
+    messageForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
+
+        const message = messageInput.value.trim();
+        if (!message) return;
+
+        messageInput.value = "";
+        messageInput.focus();
+        try {
+            await sendMessage(message);
+        } catch (error) {
+            console.error("Message send error:", error);
+        }
+    });
+}
+
+window.addEventListener("beforeunload", () => {
+    localStorage.setItem("openchat-username", username);
+    fetch("/presence", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: userToken })
+    }).catch(() => {});
 });
 
-socket.on("online_users", function(count) {
-    if (count === 1) {
-        onlineUsers.innerHTML = "🟢 1 User Online";
-    } else {
-        onlineUsers.innerHTML = "🟢 " + count + " Users Online";
+localStorage.setItem("openchat-username", username);
+
+async function startPolling() {
+    if (document.hidden) {
+        return;
     }
-});
+
+    await loadMessages();
+    await updatePresence();
+    pollingTimer = setTimeout(startPolling, 1200);
+}
+
+if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", () => {
+        if (!document.hidden && !pollingTimer) {
+            startPolling();
+        }
+    });
+}
+
+startPolling();
 

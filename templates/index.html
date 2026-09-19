@@ -9,32 +9,41 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
+    <div class="app-shell">
+        <div class="chat-container">
+            <header class="header">
+                <div class="brand-wrap">
+                    <div class="brand-icon">🌍</div>
+                    <div class="brand-copy">
+                        <div class="brand-name">OpenChat</div>
+                        <div class="brand-tagline">Live community space</div>
+                    </div>
+                </div>
 
-    <div class="chat-container">
+                <div class="header-controls">
+                    <label class="username-panel" for="username-input">
+                        <span>Name</span>
+                        <input id="username-input" type="text" maxlength="30" placeholder="Your name" />
+                    </label>
+                    <div id="online-users" class="online-users">🟢 0 online</div>
+                    <button id="theme-toggle" class="theme-toggle" aria-pressed="false" title="Toggle theme">
+                        <span class="moon">🌙</span>
+                        <span class="sun">☀️</span>
+                    </button>
+                </div>
+            </header>
 
-        <header class="header">
-            <div class="brand">🌍 <span class="brand-name">OpenChat</span></div>
-            <div class="header-controls">
-                <div id="online-users">🟢 0 Users Online</div>
-                <button id="theme-toggle" class="theme-toggle" aria-pressed="false" title="Toggle theme">
-                    <span class="moon">🌙</span>
-                    <span class="sun">☀️</span>
-                </button>
-            </div>
-        </header>
+            <main class="chat-main">
+                <div class="chat-box" id="chat-box" aria-live="polite"></div>
+            </main>
 
-        <main class="chat-main">
-            <div class="chat-box" id="chat-box"></div>
-        </main>
-
-        <div class="input-area">
-            <input type="text" id="message-input" placeholder="Type your message...">
-            <button id="send-button">Send</button>
+            <form class="input-area" id="message-form">
+                <input type="text" id="message-input" placeholder="Type your message..." autocomplete="off">
+                <button id="send-button" type="submit">Send</button>
+            </form>
         </div>
-
     </div>
 
-<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-<script src="{{ url_for('static', filename='script.js') }}"></script>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
 </html>
