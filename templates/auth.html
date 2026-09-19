@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenChat | Authentication</title>
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="device-{{ device_type }}" data-device-type="{{ device_type }}">
+    <div class="auth-shell">
+        <div class="auth-card">
+            <div class="auth-header">
+                <div class="brand-wrap">
+                    <div class="brand-icon">🌍</div>
+                    <div class="brand-copy">
+                        <div class="brand-name">OpenChat</div>
+                        <div class="brand-tagline">Live community space</div>
+                    </div>
+                </div>
+                <a href="{{ url_for('home') }}" class="secondary-link">← Back to chat</a>
+            </div>
+
+            <div class="auth-tabs" role="tablist" aria-label="Authentication mode selector">
+                <a href="{{ url_for('auth_page', mode='login') }}" class="auth-tab {% if auth_mode == 'login' %}active{% endif %}">Log In</a>
+                <a href="{{ url_for('auth_page', mode='signup') }}" class="auth-tab {% if auth_mode == 'signup' %}active{% endif %}">Sign Up</a>
+            </div>
+
+            {% if error %}
+            <div class="form-message error-message" role="alert">{{ error }}</div>
+            {% endif %}
+
+            {% if auth_mode == 'signup' %}
+            <form method="post" action="{{ url_for('auth_page') }}" class="auth-form" novalidate>
+                <input type="hidden" name="mode" value="signup">
+                <label>
+                    <span>Display name</span>
+                    <input type="text" id="signup-username" name="username" maxlength="30" placeholder="Enter your name" required>
+                    <small id="username-status" class="field-status" aria-live="polite"></small>
+                </label>
+                <label>
+                    <span>Password</span>
+                    <input type="password" name="password" minlength="8" placeholder="At least 8 characters" required>
+                </label>
+                <label>
+                    <span>Confirm password</span>
+                    <input type="password" name="confirm_password" minlength="8" placeholder="Re-enter your password" required>
+                </label>
+                <button type="submit" class="primary-button">Create account</button>
+            </form>
+            {% else %}
+            <form method="post" action="{{ url_for('auth_page') }}" class="auth-form" novalidate>
+                <input type="hidden" name="mode" value="login">
+                <label>
+                    <span>Username</span>
+                    <input type="text" name="username" placeholder="Your username" required>
+                </label>
+                <label>
+                    <span>Password</span>
+                    <input type="password" name="password" placeholder="Your password" required>
+                </label>
+                <button type="submit" class="primary-button">Log in</button>
+            </form>
+            {% endif %}
+        </div>
+    </div>
+
+    <script>
+        const usernameInput = document.getElementById('signup-username');
+        const usernameStatus = document.getElementById('username-status');
+
+        if (usernameInput && usernameStatus) {
+            let debounceTimer = null;
+            const checkUsername = async () => {
+                const username = usernameInput.value.trim();
+                if (!username) {
+                    usernameStatus.textContent = '';
+                    usernameStatus.classList.remove('error', 'success');
+                    return;
+                }
+
+                usernameStatus.textContent = 'Checking username...';
+                usernameStatus.classList.remove('error', 'success');
+
+                try {
+                    const response = await fetch(`/api/check-username?username=${encodeURIComponent(username)}`);
+                    const result = await response.json();
+                    usernameStatus.textContent = result.message || '';
+                    usernameStatus.classList.toggle('error', !result.available);
+                    usernameStatus.classList.toggle('success', !!result.available);
+                } catch (error) {
+                    usernameStatus.textContent = 'Could not check username right now.';
+                    usernameStatus.classList.add('error');
+                }
+            };
+
+            usernameInput.addEventListener('input', () => {
+                clearTimeout(debounceTimer);
+                debounceTimer = setTimeout(checkUsername, 350);
+            });
+        }
+    </script>
+</body>
+</html>

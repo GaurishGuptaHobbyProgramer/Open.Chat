@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenChat | Settings</title>
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="device-{{ device_type }}" data-device-type="{{ device_type }}">
+    <div class="settings-shell">
+        <div class="settings-card">
+            <div class="settings-header">
+                <div>
+                    <p class="eyebrow">Settings</p>
+                    <h1>Account & preferences</h1>
+                </div>
+                <a href="{{ url_for('home') }}" class="secondary-link">← Back to chat</a>
+            </div>
+
+            <div class="settings-list">
+                {% if current_user %}
+                <section class="settings-section">
+                    <h2>Account</h2>
+                    <div class="profile-card">
+                        <div class="profile-avatar">{{ current_user.username[:2]|upper }}</div>
+                        <div class="profile-details">
+                            <strong>{{ current_user.username }}</strong>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="settings-section">
+                    <h2>Access</h2>
+                    <form method="post" action="{{ url_for('logout_page') }}">
+                        <button type="submit" class="danger-button">Log out</button>
+                    </form>
+                </section>
+                {% else %}
+                <section class="settings-section">
+                    <h2>Access</h2>
+                    <a href="{{ url_for('auth_page', mode='login') }}" class="primary-button settings-button">Log In / Sign In</a>
+                </section>
+                {% endif %}
+
+                <section class="settings-section">
+                    <h2>Other</h2>
+                    <div class="placeholder-setting">More settings can be added here later.</div>
+                </section>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

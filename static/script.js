@@ -24,8 +24,7 @@ const userToken = storedToken;
 
 localStorage.setItem("openchat-user-token", userToken);
 
-const usernameInput = document.getElementById("username-input");
-let username = storedUser || `Anonymous ${randomID}`;
+const username = document.body.dataset.currentUsername || storedUser || `Anonymous ${randomID}`;
 
 const messageForm = document.getElementById("message-form");
 const messageInput = document.getElementById("message-input");
@@ -45,14 +44,6 @@ function applyDeviceMode(mode) {
         deviceModeToggle.textContent = nextMode === "mobile" ? "Desktop mode" : "Mobile mode";
         deviceModeToggle.setAttribute("aria-label", nextMode === "mobile" ? "Switch to desktop mode" : "Switch to mobile mode");
     }
-}
-
-if (usernameInput) {
-    usernameInput.value = username;
-    usernameInput.addEventListener("input", () => {
-        username = usernameInput.value.trim() || `Anonymous ${randomID}`;
-        localStorage.setItem("openchat-username", username);
-    });
 }
 
 function applyTheme(theme) {
@@ -242,7 +233,7 @@ async function sendMessage(message) {
     const response = await fetch("/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, message }),
+        body: JSON.stringify({ message }),
         cache: "no-store"
     });
 
