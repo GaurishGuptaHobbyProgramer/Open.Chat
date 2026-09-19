@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request
 from flask_socketio import SocketIO, send, emit
 from datetime import datetime
+import os
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "openchat"
 
@@ -49,9 +50,6 @@ def user_disconnected():
         len(connected_users),
         broadcast=True
     )
-
-    import os
-
 if __name__ == "__main__":
     socketio.run(
         app,

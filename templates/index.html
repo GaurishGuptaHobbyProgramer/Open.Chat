@@ -4,23 +4,26 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenChat</title>
-
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
 
     <div class="chat-container">
 
-        <div class="header">
-    🌍 OpenChat
-    <div id="online-users">
-        🟢 0 Users Online
-    </div>
-</div>
+        <header class="header">
+            <div class="brand">🌍 <span class="brand-name">OpenChat</span></div>
+            <div class="header-controls">
+                <div id="online-users">🟢 0 Users Online</div>
+                <button id="theme-toggle" class="theme-toggle" aria-pressed="false" title="Toggle theme">
+                    <span class="moon">🌙</span>
+                    <span class="sun">☀️</span>
+                </button>
+            </div>
+        </header>
 
-        <div class="chat-box" id="chat-box"></div>
-            <p><b>System:</b> Welcome to OpenChat!</p>
-        </div>
+        <main class="chat-main">
+            <div class="chat-box" id="chat-box"></div>
+        </main>
 
         <div class="input-area">
             <input type="text" id="message-input" placeholder="Type your message...">
@@ -28,6 +31,7 @@
         </div>
 
     </div>
+
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
