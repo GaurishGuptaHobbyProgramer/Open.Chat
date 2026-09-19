@@ -100,24 +100,44 @@ function escapeHTML(str) {
 function formatDeviceTimestamp(value) {
     if (!value) {
         const now = new Date();
-        return `${String(now.getDate()).padStart(2, "0")}/${String(now.getMonth() + 1).padStart(2, "0")}/${now.getFullYear()}, ${String(now.getHours() % 12 || 12).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")} ${now.getHours() >= 12 ? "PM" : "AM"}`;
+        return new Intl.DateTimeFormat(undefined, {
+            day: "2-digit",
+            month: "2-digit",
+            year: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: true,
+        }).format(now);
     }
 
-    const dateValue = typeof value === "string" ? value.replace(" ", "T") : value;
-    const parsedDate = new Date(dateValue);
-    if (Number.isNaN(parsedDate.getTime())) {
-        return value;
+    const rawValue = typeof value === "string" ? value.trim() : value;
+    const dateCandidates = [];
+
+    if (typeof rawValue === "string") {
+        dateCandidates.push(rawValue);
+        dateCandidates.push(rawValue.replace(" ", "T"));
+        if (!rawValue.endsWith("Z") && /\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}/.test(rawValue)) {
+            dateCandidates.push(`${rawValue.endsWith("T") ? rawValue : rawValue.replace(" ", "T")}Z`);
+        }
+    } else {
+        dateCandidates.push(rawValue);
     }
 
-    const day = String(parsedDate.getDate()).padStart(2, "0");
-    const month = String(parsedDate.getMonth() + 1).padStart(2, "0");
-    const year = parsedDate.getFullYear();
-    let hours = parsedDate.getHours();
-    const minutes = String(parsedDate.getMinutes()).padStart(2, "0");
-    const suffix = hours >= 12 ? "PM" : "AM";
-    hours = hours % 12 || 12;
+    for (const candidate of dateCandidates) {
+        const parsedDate = new Date(candidate);
+        if (!Number.isNaN(parsedDate.getTime())) {
+            return new Intl.DateTimeFormat(undefined, {
+                day: "2-digit",
+                month: "2-digit",
+                year: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+                hour12: true,
+            }).format(parsedDate);
+        }
+    }
 
-    return `${day}/${month}/${year}, ${String(hours).padStart(2, "0")}:${minutes} ${suffix}`;
+    return rawValue;
 }
 
 function appendMessage(data, isOwnMessage = false) {

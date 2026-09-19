@@ -29,7 +29,13 @@ class ChatDatabaseTest(unittest.TestCase):
             self.assertEqual(messages[1]["message"], "Hi Alice")
 
     def test_message_time_format(self):
-        self.assertEqual("02/01/2025, 08:05 AM", format_message_time("2025-01-02 08:05:00"))
+        self.assertIn("02/01/2025", format_message_time("2025-01-02T08:05:00Z"))
+
+    def test_saved_message_uses_utc_iso_format(self):
+        with self.app.app_context():
+            payload = save_message("Alice", "Hello")
+            self.assertIn("T", payload["created_at"])
+            self.assertTrue(payload["created_at"].endswith("Z"))
 
     def test_detect_device_type(self):
         self.assertEqual("mobile", detect_device_type("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)"))

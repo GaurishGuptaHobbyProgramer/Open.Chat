@@ -1,6 +1,6 @@
 import os
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from flask import Flask, g, current_app, jsonify, render_template, request
 
@@ -44,7 +44,17 @@ def close_db(error):
 
 def format_message_time(value):
     try:
-        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").strftime("%d/%m/%Y, %I:%M %p")
+        if value is None:
+            raise ValueError("timestamp is required")
+
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+
+        parsed = datetime.fromisoformat(text.replace(" ", "T"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone().strftime("%d/%m/%Y, %I:%M %p")
     except (TypeError, ValueError):
         return datetime.now().strftime("%d/%m/%Y, %I:%M %p")
 
@@ -71,7 +81,7 @@ def save_message(username, message):
     if not clean_message:
         return None
 
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     db = get_db()
     cursor = db.execute(
         "INSERT INTO messages (username, message, created_at) VALUES (?, ?, ?)",
