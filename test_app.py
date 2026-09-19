@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 
-from app import create_app, format_message_time, get_messages, save_message
+from app import create_app, detect_device_type, format_message_time, get_messages, save_message
 
 
 class ChatDatabaseTest(unittest.TestCase):
@@ -30,6 +30,11 @@ class ChatDatabaseTest(unittest.TestCase):
 
     def test_message_time_format(self):
         self.assertEqual("02/01/2025, 08:05 AM", format_message_time("2025-01-02 08:05:00"))
+
+    def test_detect_device_type(self):
+        self.assertEqual("mobile", detect_device_type("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)"))
+        self.assertEqual("mobile", detect_device_type("Mozilla/5.0 (Linux; Android 14; Pixel 8)"))
+        self.assertEqual("desktop", detect_device_type("Mozilla/5.0 (Windows NT 10.0; Win64; x64)"))
 
 
 if __name__ == "__main__":

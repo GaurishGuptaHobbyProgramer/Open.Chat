@@ -1,4 +1,19 @@
 const randomID = Math.floor(Math.random() * 9000) + 1000;
+
+function detectDeviceTypeFromUserAgent() {
+    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+        || (window.matchMedia && window.matchMedia("(max-width: 640px)").matches)
+        ? "mobile"
+        : "desktop";
+}
+
+const savedDeviceMode = localStorage.getItem("openchat-device-mode");
+const initialDeviceType = savedDeviceMode || detectDeviceTypeFromUserAgent();
+const deviceType = initialDeviceType === "mobile" ? "mobile" : "desktop";
+
+document.body.classList.add(deviceType === "mobile" ? "device-mobile" : "device-desktop");
+document.body.dataset.deviceType = deviceType;
+
 const storedUser = localStorage.getItem("openchat-username");
 const storedToken = localStorage.getItem("openchat-user-token") || (
     (typeof crypto !== "undefined" && crypto.randomUUID)
@@ -17,6 +32,20 @@ const messageInput = document.getElementById("message-input");
 const chatBox = document.getElementById("chat-box");
 const onlineUsers = document.getElementById("online-users");
 const themeToggle = document.getElementById("theme-toggle");
+const deviceModeToggle = document.getElementById("device-mode-toggle");
+
+function applyDeviceMode(mode) {
+    const nextMode = mode === "mobile" ? "mobile" : "desktop";
+    document.body.classList.remove("device-mobile", "device-desktop");
+    document.body.classList.add(nextMode === "mobile" ? "device-mobile" : "device-desktop");
+    document.body.dataset.deviceType = nextMode;
+    localStorage.setItem("openchat-device-mode", nextMode);
+
+    if (deviceModeToggle) {
+        deviceModeToggle.textContent = nextMode === "mobile" ? "Desktop mode" : "Mobile mode";
+        deviceModeToggle.setAttribute("aria-label", nextMode === "mobile" ? "Switch to desktop mode" : "Switch to mobile mode");
+    }
+}
 
 if (usernameInput) {
     usernameInput.value = username;
@@ -50,6 +79,15 @@ if (themeToggle) {
         localStorage.setItem("openchat-theme", nextTheme);
     });
 }
+
+if (deviceModeToggle) {
+    deviceModeToggle.addEventListener("click", () => {
+        const nextMode = document.body.classList.contains("device-mobile") ? "desktop" : "mobile";
+        applyDeviceMode(nextMode);
+    });
+}
+
+applyDeviceMode(deviceType);
 
 function escapeHTML(str) {
     if (!str) return "";

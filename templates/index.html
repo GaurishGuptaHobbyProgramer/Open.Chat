@@ -8,7 +8,7 @@
     <link rel="apple-touch-icon" href="{{ url_for('static', filename='favicon.svg') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-<body>
+<body class="device-{{ device_type }}" data-device-type="{{ device_type }}">
     <div class="app-shell">
         <div class="chat-container">
             <header class="header">
@@ -26,6 +26,9 @@
                         <input id="username-input" type="text" maxlength="30" placeholder="Your name" />
                     </label>
                     <div id="online-users" class="online-users">🟢 0 online</div>
+                    <button id="device-mode-toggle" class="device-mode-toggle" type="button" aria-label="Toggle between desktop and mobile mode">
+                        Mobile mode
+                    </button>
                     <button id="theme-toggle" class="theme-toggle" aria-pressed="false" title="Toggle theme">
                         <span class="moon">🌙</span>
                         <span class="sun">☀️</span>

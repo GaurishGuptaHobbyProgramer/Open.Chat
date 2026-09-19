@@ -49,6 +49,21 @@ def format_message_time(value):
         return datetime.now().strftime("%d/%m/%Y, %I:%M %p")
 
 
+def detect_device_type(user_agent):
+    ua = (user_agent or "").lower()
+    mobile_indicators = [
+        "android",
+        "iphone",
+        "ipad",
+        "ipod",
+        "mobile",
+        "blackberry",
+        "windows phone",
+        "opera mini",
+    ]
+    return "mobile" if any(marker in ua for marker in mobile_indicators) else "desktop"
+
+
 def save_message(username, message):
     clean_username = (username or "Anonymous").strip()[:30] or "Anonymous"
     clean_message = (message or "").strip()
@@ -149,7 +164,8 @@ def create_app(test_config=None):
 
     @app.route("/")
     def home():
-        return render_template("index.html")
+        device_type = detect_device_type(request.user_agent.string)
+        return render_template("index.html", device_type=device_type)
 
     @app.route("/messages", methods=["GET"])
     def list_messages():
