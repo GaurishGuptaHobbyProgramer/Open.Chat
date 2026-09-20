@@ -1,5 +1,30 @@
 const randomID = Math.floor(Math.random() * 9000) + 1000;
 
+const liveBackgrounds = [
+    "linear-gradient(135deg, rgba(8, 15, 29, 0.72), rgba(30, 64, 175, 0.48)), url('https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=1800&q=80')",
+    "linear-gradient(135deg, rgba(11, 17, 29, 0.68), rgba(14, 116, 144, 0.52)), url('https://images.unsplash.com/photo-1526379095098-d400fd0bf935?auto=format&fit=crop&w=1800&q=80')",
+    "linear-gradient(135deg, rgba(17, 24, 39, 0.7), rgba(76, 29, 149, 0.44)), url('https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&w=1800&q=80')",
+    "linear-gradient(135deg, rgba(15, 23, 42, 0.7), rgba(22, 163, 74, 0.4)), url('https://images.unsplash.com/photo-1531482615713-2afd69097998?auto=format&fit=crop&w=1800&q=80')",
+    "linear-gradient(135deg, rgba(10, 15, 26, 0.7), rgba(59, 130, 246, 0.36)), url('https://images.unsplash.com/photo-1485827404703-89b55fcc595e?auto=format&fit=crop&w=1800&q=80')"
+];
+
+let liveBackgroundIndex = 0;
+
+function rotateLiveBackground() {
+    liveBackgroundIndex = (liveBackgroundIndex + 1) % liveBackgrounds.length;
+    const nextBackground = liveBackgrounds[liveBackgroundIndex];
+    document.documentElement.style.setProperty("--live-background-image", nextBackground);
+    document.body.style.backgroundImage = nextBackground;
+}
+
+setInterval(rotateLiveBackground, 5000);
+
+if (document.readyState === "complete") {
+    rotateLiveBackground();
+} else {
+    window.addEventListener("load", rotateLiveBackground, { once: true });
+}
+
 function detectDeviceTypeFromUserAgent() {
     return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
         || (window.matchMedia && window.matchMedia("(max-width: 640px)").matches)
@@ -340,6 +365,67 @@ if (typeof document !== "undefined") {
         if (!document.hidden && !pollingTimer) {
             startPolling();
         }
+    });
+}
+
+const aiBadge = document.querySelector(".ai-floating-panel");
+
+if (aiBadge) {
+    let isDragging = false;
+    let dragOffsetX = 0;
+    let dragOffsetY = 0;
+
+    function updateBadgePosition(x, y) {
+        const maxX = window.innerWidth - aiBadge.offsetWidth - 12;
+        const maxY = window.innerHeight - aiBadge.offsetHeight - 12;
+        const nextX = Math.min(Math.max(x, 12), maxX);
+        const nextY = Math.min(Math.max(y, 12), maxY);
+        aiBadge.style.left = `${nextX}px`;
+        aiBadge.style.top = `${nextY}px`;
+        aiBadge.style.right = "auto";
+        aiBadge.style.bottom = "auto";
+    }
+
+    aiBadge.addEventListener("pointerdown", (event) => {
+        const rect = aiBadge.getBoundingClientRect();
+        dragOffsetX = event.clientX - rect.left;
+        dragOffsetY = event.clientY - rect.top;
+        isDragging = true;
+        aiBadge.setPointerCapture(event.pointerId);
+        aiBadge.style.transition = "none";
+    });
+
+    aiBadge.addEventListener("pointermove", (event) => {
+        if (!isDragging) return;
+        updateBadgePosition(event.clientX - dragOffsetX, event.clientY - dragOffsetY);
+    });
+
+    aiBadge.addEventListener("pointerup", () => {
+        isDragging = false;
+        aiBadge.style.transition = "transform 0.15s ease";
+    });
+
+    aiBadge.addEventListener("pointerleave", () => {
+        isDragging = false;
+        aiBadge.style.transition = "transform 0.15s ease";
+    });
+
+    const storedBadgePosition = localStorage.getItem("openchat-ai-badge-position");
+    if (storedBadgePosition) {
+        try {
+            const position = JSON.parse(storedBadgePosition);
+            requestAnimationFrame(() => updateBadgePosition(position.x || 20, position.y || 20));
+        } catch (error) {
+            console.error("Failed to restore AI badge position:", error);
+        }
+    }
+
+    window.addEventListener("beforeunload", () => {
+        const rect = aiBadge.getBoundingClientRect();
+        localStorage.setItem("openchat-ai-badge-position", JSON.stringify({
+            x: rect.left,
+            y: rect.top,
+        }));
     });
 }
 

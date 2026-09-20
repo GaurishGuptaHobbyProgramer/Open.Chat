@@ -8,6 +8,17 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body class="device-{{ device_type }}" data-device-type="{{ device_type }}">
+    <div class="ambient-backdrop" aria-hidden="true">
+        <div class="backdrop-glow glow-one"></div>
+        <div class="backdrop-glow glow-two"></div>
+        <div class="backdrop-grid"></div>
+    </div>
+
+    <aside class="ai-floating-panel ai-floating-panel-inline" aria-label="AI model status">
+        <div class="ai-badge"><span class="ai-status-dot"></span>AI live vision</div>
+        <p>Ambient visuals tuned for focus and calm.</p>
+    </aside>
+
     <div class="settings-shell">
         <div class="settings-card">
             <div class="settings-header">
