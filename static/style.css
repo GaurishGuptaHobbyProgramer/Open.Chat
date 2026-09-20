@@ -11,11 +11,15 @@
     --own-msg: #d9f8e8;
     --other-msg: rgba(255, 255, 255, 0.9);
     --text: #edf6ff;
-    --text-soft: #cbd9ea;
-    --bubble-text: #17273d;
-    --bubble-muted: #59708c;
+    --text-soft: #dfeafc;
+    --bubble-text: #f1f7ff;
+    --bubble-muted: #dfeafb;
     --line: rgba(255, 255, 255, 0.08);
     --shadow: rgba(3, 7, 18, 0.48);
+    --bubble-bg: rgba(20, 28, 40, 0.32);
+    --bubble-bg-own: rgba(32, 185, 154, 0.28);
+    --text-glow: rgba(110, 231, 183, 0.52);
+    --text-glow-alt: rgba(96, 165, 250, 0.52);
     --avatar-bg: linear-gradient(135deg, #6ee7b7, #3b82f6);
     --avatar-own: linear-gradient(135deg, #a7f3d0, #34d399);
     --live-background-image: linear-gradient(135deg, rgba(8, 15, 29, 0.7), rgba(21, 41, 70, 0.56)),
@@ -32,12 +36,16 @@
     --muted: #67748a;
     --own-msg: #dff8ea;
     --other-msg: rgba(255, 255, 255, 0.94);
-    --text: #142033;
-    --text-soft: #374a67;
-    --bubble-text: #17273d;
-    --bubble-muted: #5f7187;
+    --text: #10213a;
+    --text-soft: #304767;
+    --bubble-text: #13233d;
+    --bubble-muted: #4d637d;
     --line: rgba(20, 32, 51, 0.08);
     --shadow: rgba(88, 128, 187, 0.18);
+    --bubble-bg: rgba(255, 255, 255, 0.68);
+    --bubble-bg-own: rgba(140, 245, 209, 0.52);
+    --text-glow: rgba(81, 130, 255, 0.26);
+    --text-glow-alt: rgba(45, 212, 191, 0.24);
     --avatar-bg: linear-gradient(135deg, #62d0ff, #2f80ed);
     --avatar-own: linear-gradient(135deg, #9ae6b4, #2bb673);
     --live-background-image: linear-gradient(135deg, rgba(239, 246, 255, 0.72), rgba(191, 219, 254, 0.62)),
@@ -54,6 +62,14 @@ html, body {
     font-family: "Inter", sans-serif;
     background: linear-gradient(180deg, var(--bg-1), var(--bg-2));
     color: var(--text);
+    color-scheme: light dark;
+    text-shadow: 0 0 10px var(--text-glow), 0 0 22px var(--text-glow-alt);
+}
+
+body {
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
 }
 
 body {
@@ -260,11 +276,14 @@ body::after {
     font-size: 1.12rem;
     font-weight: 800;
     letter-spacing: 0.02em;
+    color: #7ef9ff;
+    text-shadow: 0 0 12px rgba(126, 249, 255, 0.9), 0 0 24px rgba(110, 231, 183, 0.7), 0 0 40px rgba(126, 249, 255, 0.5);
 }
 
 .brand-tagline {
     font-size: 0.72rem;
-    color: var(--muted);
+    color: #c8faff;
+    text-shadow: 0 0 10px rgba(126, 249, 255, 0.7), 0 0 20px rgba(110, 231, 183, 0.4);
 }
 
 .header-controls {
@@ -306,6 +325,7 @@ body::after {
     font-weight: 600;
     color: var(--text-soft);
     white-space: nowrap;
+    text-shadow: 0 0 10px var(--text-glow), 0 0 18px rgba(45, 212, 191, 0.18);
 }
 
 .device-mode-toggle {
@@ -403,17 +423,18 @@ body::after {
     min-width: 0;
     padding: 12px 14px;
     border-radius: 18px 18px 18px 8px;
-    background: rgba(255, 255, 255, 0.16);
-    border: 1px solid rgba(255, 255, 255, 0.18);
-    box-shadow: 0 12px 25px rgba(10, 16, 32, 0.12);
+    background: var(--bubble-bg);
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    box-shadow: 0 12px 25px rgba(10, 16, 32, 0.12), 0 0 18px rgba(96, 165, 250, 0.14);
     color: var(--bubble-text);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
+    text-shadow: 0 0 12px var(--text-glow), 0 0 20px rgba(96, 165, 250, 0.18);
 }
 
 .message.own .message-content {
-    background: rgba(217, 248, 232, 0.24);
-    border: 1px solid rgba(16, 185, 129, 0.2);
+    background: var(--bubble-bg-own);
+    border: 1px solid rgba(16, 185, 129, 0.22);
     border-radius: 18px 18px 8px 18px;
 }
 
@@ -425,11 +446,13 @@ body::after {
     margin-bottom: 6px;
     color: var(--bubble-muted);
     font-size: 0.73rem;
+    font-weight: 700;
+    text-shadow: 0 0 12px var(--text-glow);
 }
 
 .message-header b {
     color: var(--bubble-text);
-    font-weight: 700;
+    font-weight: 800;
 }
 
 .message-body {
@@ -438,6 +461,7 @@ body::after {
     line-height: 1.45;
     font-size: 0.96rem;
     color: var(--bubble-text);
+    text-shadow: 0 0 12px var(--text-glow), 0 0 20px rgba(96, 165, 250, 0.18);
 }
 
 .message-text {
@@ -547,6 +571,7 @@ body::after {
     font-size: 0.76rem;
     font-weight: 700;
     white-space: nowrap;
+    text-shadow: 0 0 10px var(--text-glow);
 }
 
 .account-chip {
@@ -558,6 +583,7 @@ body::after {
     font-size: 0.75rem;
     font-weight: 700;
     white-space: nowrap;
+    text-shadow: 0 0 8px var(--text-glow);
 }
 
 .auth-shell,
