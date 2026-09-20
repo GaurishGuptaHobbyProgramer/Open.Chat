@@ -111,6 +111,13 @@ class ChatDatabaseTest(unittest.TestCase):
             if os.path.exists(duplicate_db_path):
                 os.remove(duplicate_db_path)
 
+    def test_message_can_store_attachment_metadata(self):
+        with self.app.app_context():
+            payload = save_message("Alice", "check this", attachment_name="notes.pdf", attachment_type="application/pdf")
+            self.assertIn("attachment_name", payload)
+            self.assertEqual(payload["attachment_name"], "notes.pdf")
+            self.assertEqual(payload["attachment_type"], "application/pdf")
+
     def test_legacy_users_schema_is_migrated_to_serial_usernames(self):
         legacy_db_fd, legacy_db_path = tempfile.mkstemp()
         os.close(legacy_db_fd)

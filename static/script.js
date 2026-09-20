@@ -131,10 +131,46 @@ function formatDeviceTimestamp(value) {
     return rawValue;
 }
 
+function renderAttachmentMarkup(data) {
+    const attachmentName = data.attachment_name || "Attachment";
+    const attachmentType = data.attachment_type || "";
+    const attachmentUrl = data.attachment_url || "";
+
+    if (!attachmentUrl) {
+        return "";
+    }
+
+    if (attachmentType.startsWith("image/")) {
+        return `
+            <div class="attachment attachment-image">
+                <img src="${attachmentUrl}" alt="${escapeHTML(attachmentName)}" />
+            </div>
+            <a class="attachment-link" href="${attachmentUrl}" target="_blank" rel="noopener noreferrer">${escapeHTML(attachmentName)}</a>
+        `;
+    }
+
+    if (attachmentType.startsWith("video/")) {
+        return `
+            <div class="attachment attachment-video">
+                <video controls src="${attachmentUrl}"></video>
+            </div>
+            <a class="attachment-link" href="${attachmentUrl}" target="_blank" rel="noopener noreferrer">${escapeHTML(attachmentName)}</a>
+        `;
+    }
+
+    return `
+        <div class="attachment attachment-file">
+            <a class="attachment-link" href="${attachmentUrl}" target="_blank" rel="noopener noreferrer">${escapeHTML(attachmentName)}</a>
+        </div>
+    `;
+}
+
 function appendMessage(data, isOwnMessage = false) {
     const safeUsername = data.username || "Unknown";
     const initials = safeUsername.split(" ").pop().slice(0, 2).toUpperCase() || "?";
     const timestamp = formatDeviceTimestamp(data.created_at || data.time || new Date());
+    const messageText = data.message ? escapeHTML(data.message) : "";
+    const attachmentMarkup = renderAttachmentMarkup(data);
     const messageElement = document.createElement("div");
     messageElement.className = `message ${isOwnMessage ? "own" : ""}`;
 
@@ -145,7 +181,10 @@ function appendMessage(data, isOwnMessage = false) {
                 <b>${escapeHTML(safeUsername)}</b>
                 <span>${escapeHTML(timestamp)}</span>
             </div>
-            <div class="message-body">${escapeHTML(data.message || "")}</div>
+            <div class="message-body">
+                ${messageText ? `<div class="message-text">${messageText}</div>` : ""}
+                ${attachmentMarkup}
+            </div>
         </div>
     `;
 
@@ -227,13 +266,18 @@ async function updatePresence() {
     }
 }
 
-async function sendMessage(message) {
-    if (!message) return;
+async function sendMessage(message, file) {
+    const formData = new FormData();
+    if (message) {
+        formData.append("message", message);
+    }
+    if (file) {
+        formData.append("attachment", file);
+    }
 
     const response = await fetch("/messages", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message }),
+        body: formData,
         cache: "no-store"
     });
 
@@ -246,17 +290,24 @@ async function sendMessage(message) {
     lastMessageId = Math.max(lastMessageId || 0, Number(payload.id) || 0);
 }
 
+const attachmentInput = document.getElementById("attachment-input");
+
 if (messageForm) {
     messageForm.addEventListener("submit", async function (event) {
         event.preventDefault();
 
         const message = messageInput.value.trim();
-        if (!message) return;
+        const file = attachmentInput && attachmentInput.files ? attachmentInput.files[0] : null;
+
+        if (!message && !file) return;
 
         messageInput.value = "";
+        if (attachmentInput) {
+            attachmentInput.value = "";
+        }
         messageInput.focus();
         try {
-            await sendMessage(message);
+            await sendMessage(message, file);
         } catch (error) {
             console.error("Message send error:", error);
         }

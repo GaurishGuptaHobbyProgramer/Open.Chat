@@ -42,7 +42,9 @@
                 <div class="chat-box" id="chat-box" aria-live="polite"></div>
             </main>
 
-            <form class="input-area" id="message-form">
+            <form class="input-area" id="message-form" enctype="multipart/form-data">
+                <label class="attachment-button" for="attachment-input" title="Attach a file">📎</label>
+                <input type="file" id="attachment-input" name="attachment" accept="*/*" hidden>
                 <input type="text" id="message-input" placeholder="Type your message..." autocomplete="off">
                 <button id="send-button" type="submit">Send</button>
             </form>

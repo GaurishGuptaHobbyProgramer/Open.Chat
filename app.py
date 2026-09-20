@@ -1,10 +1,12 @@
 import os
 import re
 import sqlite3
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from flask import Flask, g, current_app, jsonify, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.utils import secure_filename
 
 
 def get_db():
@@ -22,10 +24,20 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT NOT NULL,
             message TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            attachment_name TEXT,
+            attachment_type TEXT,
+            attachment_url TEXT,
+            attachment_size INTEGER DEFAULT 0
         )
         """
     )
+
+    message_columns = {row[1] for row in db.execute("PRAGMA table_info(messages)").fetchall()}
+    for column_name in ["attachment_name", "attachment_type", "attachment_url", "attachment_size"]:
+        if column_name not in message_columns:
+            db.execute(f"ALTER TABLE messages ADD COLUMN {column_name} {'TEXT' if column_name != 'attachment_size' else 'INTEGER DEFAULT 0'}")
+
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS presence (
@@ -217,18 +229,31 @@ def logout_user():
     session.clear()
 
 
-def save_message(username, message):
+def save_message(username, message, attachment_name=None, attachment_type=None, attachment_url=None, attachment_size=0):
     clean_username = (username or "Anonymous").strip()[:30] or "Anonymous"
     clean_message = (message or "").strip()
 
-    if not clean_message:
+    if not clean_message and not attachment_name:
         return None
+
+    clean_attachment_name = (attachment_name or "").strip() or None
+    clean_attachment_type = (attachment_type or "").strip() or None
+    clean_attachment_url = (attachment_url or "").strip() or None
+    clean_attachment_size = int(attachment_size or 0)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     db = get_db()
     cursor = db.execute(
-        "INSERT INTO messages (username, message, created_at) VALUES (?, ?, ?)",
-        (clean_username, clean_message, timestamp),
+        "INSERT INTO messages (username, message, created_at, attachment_name, attachment_type, attachment_url, attachment_size) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            clean_username,
+            clean_message,
+            timestamp,
+            clean_attachment_name,
+            clean_attachment_type,
+            clean_attachment_url,
+            clean_attachment_size,
+        ),
     )
     db.commit()
 
@@ -238,6 +263,10 @@ def save_message(username, message):
         "message": clean_message,
         "created_at": timestamp,
         "time": format_message_time(timestamp),
+        "attachment_name": clean_attachment_name,
+        "attachment_type": clean_attachment_type,
+        "attachment_url": clean_attachment_url,
+        "attachment_size": clean_attachment_size,
     }
 
 
@@ -245,12 +274,12 @@ def get_messages(limit=250, since_id=None):
     db = get_db()
     if since_id is not None:
         rows = db.execute(
-            "SELECT id, username, message, created_at FROM messages WHERE id > ? ORDER BY id ASC LIMIT ?",
+            "SELECT id, username, message, created_at, attachment_name, attachment_type, attachment_url, attachment_size FROM messages WHERE id > ? ORDER BY id ASC LIMIT ?",
             (since_id, limit),
         ).fetchall()
     else:
         rows = db.execute(
-            "SELECT id, username, message, created_at FROM messages ORDER BY id ASC LIMIT ?",
+            "SELECT id, username, message, created_at, attachment_name, attachment_type, attachment_url, attachment_size FROM messages ORDER BY id ASC LIMIT ?",
             (limit,),
         ).fetchall()
 
@@ -261,6 +290,10 @@ def get_messages(limit=250, since_id=None):
             "message": row["message"],
             "created_at": row["created_at"],
             "time": format_message_time(row["created_at"]),
+            "attachment_name": row["attachment_name"],
+            "attachment_type": row["attachment_type"],
+            "attachment_url": row["attachment_url"],
+            "attachment_size": row["attachment_size"],
         }
         for row in rows
     ]
@@ -308,7 +341,10 @@ def create_app(test_config=None):
     app.config.from_mapping(
         SECRET_KEY="openchat",
         DATABASE=os.path.join(app.root_path, "chat.db"),
+        UPLOAD_FOLDER=os.path.join(app.root_path, "static", "uploads"),
     )
+
+    os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 
     if test_config is not None:
         app.config.update(test_config)
@@ -414,15 +450,50 @@ def create_app(test_config=None):
         if current_user is None:
             return jsonify({"error": "Authentication required"}), 401
 
-        data = request.get_json(silent=True)
-        if data is None:
-            data = {}
-        if not isinstance(data, dict):
-            return jsonify({"error": "Request body must be a JSON object."}), 400
+        attachment = request.files.get("attachment") if request.files else None
+        attachment_name = None
+        attachment_type = None
+        attachment_url = None
+        attachment_size = 0
 
-        payload = save_message(current_user["username"], data.get("message"))
+        if attachment and attachment.filename:
+            safe_name = secure_filename(attachment.filename)
+            if safe_name:
+                unique_name = f"{uuid.uuid4().hex}_{safe_name}"
+                save_path = os.path.join(app.config["UPLOAD_FOLDER"], unique_name)
+                attachment.save(save_path)
+                attachment_name = safe_name
+                attachment_type = attachment.mimetype or "application/octet-stream"
+                attachment_url = url_for("static", filename=f"uploads/{unique_name}")
+                attachment_size = os.path.getsize(save_path)
+
+        if attachment is not None and not attachment.filename:
+            attachment = None
+
+        if request.is_json and not attachment:
+            data = request.get_json(silent=True)
+            if data is None:
+                data = {}
+            if not isinstance(data, dict):
+                return jsonify({"error": "Request body must be a JSON object."}), 400
+            message_text = data.get("message")
+            attachment_name = data.get("attachment_name") or attachment_name
+            attachment_type = data.get("attachment_type") or attachment_type
+            attachment_url = data.get("attachment_url") or attachment_url
+            attachment_size = int(data.get("attachment_size") or attachment_size)
+        else:
+            message_text = request.form.get("message", "")
+
+        payload = save_message(
+            current_user["username"],
+            message_text,
+            attachment_name=attachment_name,
+            attachment_type=attachment_type,
+            attachment_url=attachment_url,
+            attachment_size=attachment_size,
+        )
         if payload is None:
-            return jsonify({"error": "Message cannot be empty"}), 400
+            return jsonify({"error": "Message or attachment is required"}), 400
         return jsonify(payload)
 
     @app.route("/presence", methods=["GET"])
