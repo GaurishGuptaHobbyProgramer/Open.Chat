@@ -35,35 +35,56 @@ def init_db():
         )
         """
     )
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at TEXT NOT NULL
+
+    user_table_exists = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'users'"
+    ).fetchone() is not None
+    if user_table_exists:
+        user_columns = {row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()}
+        if "email" in user_columns or "email_verified" in user_columns or "otp_code" in user_columns:
+            legacy_rows = db.execute(
+                "SELECT id, username, email, password_hash, created_at FROM users ORDER BY id"
+            ).fetchall()
+            db.execute("ALTER TABLE users RENAME TO users_legacy")
+            db.execute(
+                """
+                CREATE TABLE users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+
+            for row in legacy_rows:
+                base_name = (row["username"] or row["email"] or "User").strip()
+                if not base_name:
+                    base_name = "User"
+                if len(base_name) < 2:
+                    base_name = f"User {row['id']}"
+                db.execute(
+                    "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
+                    (f"{row['id']}, {base_name}", row["password_hash"], row["created_at"]),
+                )
+
+            db.execute("DROP TABLE users_legacy")
+    else:
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
         )
-        """
-    )
+
+    for index_row in db.execute("PRAGMA index_list('users')").fetchall():
+        db.execute(f"DROP INDEX IF EXISTS {index_row['name']}")
 
     db.execute("UPDATE users SET username = TRIM(username) WHERE username IS NOT NULL")
-
-    duplicate_username_rows = db.execute(
-        "SELECT id, username FROM users WHERE username IS NOT NULL ORDER BY id"
-    ).fetchall()
-    kept_usernames = set()
-    duplicate_username_ids = []
-    for row in duplicate_username_rows:
-        key = (row["username"] or "").lower().strip()
-        if key in kept_usernames:
-            duplicate_username_ids.append(row["id"])
-        else:
-            kept_usernames.add(key)
-    if duplicate_username_ids:
-        placeholders = ", ".join("?" for _ in duplicate_username_ids)
-        db.execute(f"DELETE FROM users WHERE id IN ({placeholders})", duplicate_username_ids)
-
-    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_unique ON users (LOWER(username))")
     db.commit()
 
 
@@ -127,24 +148,35 @@ def get_current_user():
     }
 
 
-def register_user(username, password):
-    clean_username = (username or "").strip()
-    if len(clean_username) < 2:
+def build_serial_username(display_name, db=None):
+    clean_name = (display_name or "").strip()
+    if len(clean_name) < 2:
         raise ValueError("Name must be at least 2 characters long.")
-    if len(clean_username) > 30:
+    if len(clean_name) > 30:
+        raise ValueError("Name must be 30 characters or fewer.")
+
+    active_db = db or get_db()
+    serial_number = active_db.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM users").fetchone()[0]
+    return f"{serial_number}, {clean_name}"
+
+
+def register_user(username, password):
+    clean_name = (username or "").strip()
+    if len(clean_name) < 2:
+        raise ValueError("Name must be at least 2 characters long.")
+    if len(clean_name) > 30:
         raise ValueError("Name must be 30 characters or fewer.")
     if len(password or "") < 8:
         raise ValueError("Password must be at least 8 characters long.")
 
     db = get_db()
-    if db.execute("SELECT 1 FROM users WHERE LOWER(username) = LOWER(?)", (clean_username,)).fetchone():
-        raise ValueError("This username is already taken.")
-
+    generated_username = build_serial_username(clean_name, db)
     password_hash = generate_password_hash(password)
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     cursor = db.execute(
         "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-        (clean_username, password_hash, timestamp),
+        (generated_username, password_hash, timestamp),
     )
     db.commit()
 
@@ -305,22 +337,35 @@ def create_app(test_config=None):
         if request.method == "POST":
             mode = request.form.get("mode", "login")
             if mode == "signup":
-                try:
-                    password = request.form.get("password", "")
-                    confirm_password = request.form.get("confirm_password", "")
-                    if confirm_password != password:
-                        raise ValueError("Passwords do not match.")
-                    register_user(
-                        request.form.get("username", ""),
-                        password,
-                    )
-                    return redirect(url_for("home"))
-                except ValueError as exc:
-                    form_error = str(exc)
+                username = (request.form.get("username") or "").strip()
+                password = request.form.get("password") or ""
+                confirm_password = request.form.get("confirm_password") or ""
+
+                if not username or not password or not confirm_password:
+                    form_error = "Please complete all signup fields."
+                else:
+                    try:
+                        if confirm_password != password:
+                            raise ValueError("Passwords do not match.")
+                        register_user(username, password)
+                        return redirect(url_for("home"))
+                    except ValueError as exc:
+                        form_error = str(exc)
+                    except sqlite3.IntegrityError as exc:
+                        current_app.logger.exception("Signup DB integrity failure for username=%s", username)
+                        form_error = "This username is already taken."
+                    except Exception as exc:
+                        current_app.logger.exception("Unhandled signup failure for username=%s", username)
+                        form_error = "Something went wrong while creating your account."
             else:
-                if authenticate_user(request.form.get("username", ""), request.form.get("password", "")):
+                username = (request.form.get("username") or "").strip()
+                password = request.form.get("password") or ""
+                if not username or not password:
+                    form_error = "Please enter both username and password."
+                elif authenticate_user(username, password):
                     return redirect(request.args.get("next") or url_for("home"))
-                form_error = "Invalid username or password."
+                else:
+                    form_error = "Invalid username or password."
 
         return render_template(
             "auth.html",
@@ -344,19 +389,15 @@ def create_app(test_config=None):
     def check_username_availability():
         username = (request.args.get("username") or "").strip()
         if not username:
-            return jsonify({"available": False, "message": "Please enter a username."})
+            return jsonify({"available": False, "message": "Please enter a name."})
 
         if len(username) < 2:
-            return jsonify({"available": False, "message": "Username must be at least 2 characters."})
+            return jsonify({"available": False, "message": "Name must be at least 2 characters."})
 
-        db = get_db()
-        exists = db.execute(
-            "SELECT 1 FROM users WHERE LOWER(username) = LOWER(?)",
-            (username,),
-        ).fetchone() is not None
-        if exists:
-            return jsonify({"available": False, "message": "Username unavailable."})
-        return jsonify({"available": True, "message": "Username available."})
+        return jsonify({
+            "available": True,
+            "message": "Name accepted. A serial username will be assigned automatically.",
+        })
 
     @app.route("/messages", methods=["GET"])
     def list_messages():
@@ -373,7 +414,12 @@ def create_app(test_config=None):
         if current_user is None:
             return jsonify({"error": "Authentication required"}), 401
 
-        data = request.get_json(silent=True) or {}
+        data = request.get_json(silent=True)
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            return jsonify({"error": "Request body must be a JSON object."}), 400
+
         payload = save_message(current_user["username"], data.get("message"))
         if payload is None:
             return jsonify({"error": "Message cannot be empty"}), 400
@@ -391,7 +437,12 @@ def create_app(test_config=None):
         if get_current_user() is None:
             return jsonify({"error": "Authentication required"}), 401
 
-        data = request.get_json(silent=True) or {}
+        data = request.get_json(silent=True)
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            return jsonify({"error": "Request body must be a JSON object."}), 400
+
         count = set_presence(data.get("token"))
         if count is None:
             return jsonify({"error": "Token is required"}), 400
@@ -402,7 +453,12 @@ def create_app(test_config=None):
         if get_current_user() is None:
             return jsonify({"error": "Authentication required"}), 401
 
-        data = request.get_json(silent=True) or {}
+        data = request.get_json(silent=True)
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            return jsonify({"error": "Request body must be a JSON object."}), 400
+
         return jsonify({"count": remove_presence(data.get("token"))})
 
     with app.app_context():
@@ -415,4 +471,4 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=True)

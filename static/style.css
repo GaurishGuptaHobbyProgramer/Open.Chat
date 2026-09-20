@@ -99,9 +99,16 @@ body {
     display: grid;
     place-items: center;
     border-radius: 14px;
-    font-size: 1.4rem;
     background: var(--avatar-bg);
     box-shadow: inset 0 1px 0 rgba(255,255,255,0.25);
+    overflow: hidden;
+}
+
+.brand-icon img {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: cover;
 }
 
 .brand-copy {

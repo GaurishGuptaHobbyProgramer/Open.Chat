@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenChat</title>
-    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
-    <link rel="apple-touch-icon" href="{{ url_for('static', filename='favicon.svg') }}">
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='openchat-logo.svg') }}">
+    <link rel="apple-touch-icon" href="{{ url_for('static', filename='openchat-logo.svg') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body class="device-{{ device_type }}" data-device-type="{{ device_type }}" data-current-username="{{ current_user.username if current_user else 'Anonymous' }}">
@@ -13,7 +13,9 @@
         <div class="chat-container">
             <header class="header">
                 <div class="brand-wrap">
-                    <div class="brand-icon">🌍</div>
+                    <div class="brand-icon" aria-label="OpenChat logo">
+                        <img src="{{ url_for('static', filename='openchat-logo.svg') }}" alt="OpenChat logo" />
+                    </div>
                     <div class="brand-copy">
                         <div class="brand-name">OpenChat</div>
                         <div class="brand-tagline">Live community space</div>
