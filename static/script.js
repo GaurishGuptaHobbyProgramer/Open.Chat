@@ -1,18 +1,27 @@
 const randomID = Math.floor(Math.random() * 9000) + 1000;
 
-const liveBackgrounds = [
-    "linear-gradient(135deg, rgba(8, 15, 29, 0.72), rgba(30, 64, 175, 0.48)), url('https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=1800&q=80')",
-    "linear-gradient(135deg, rgba(11, 17, 29, 0.68), rgba(14, 116, 144, 0.52)), url('https://images.unsplash.com/photo-1526379095098-d400fd0bf935?auto=format&fit=crop&w=1800&q=80')",
-    "linear-gradient(135deg, rgba(17, 24, 39, 0.7), rgba(76, 29, 149, 0.44)), url('https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&w=1800&q=80')",
-    "linear-gradient(135deg, rgba(15, 23, 42, 0.7), rgba(22, 163, 74, 0.4)), url('https://images.unsplash.com/photo-1531482615713-2afd69097998?auto=format&fit=crop&w=1800&q=80')",
-    "linear-gradient(135deg, rgba(10, 15, 26, 0.7), rgba(59, 130, 246, 0.36)), url('https://images.unsplash.com/photo-1485827404703-89b55fcc595e?auto=format&fit=crop&w=1800&q=80')"
-];
+let usedBackgroundSeeds = [];
 
-let liveBackgroundIndex = 0;
+function buildRandomBackgroundImage(seed) {
+    const imageUrl = `https://picsum.photos/seed/${seed}/1800/1200`;
+    return `linear-gradient(135deg, rgba(8, 15, 29, 0.68), rgba(21, 41, 70, 0.42)), url("${imageUrl}")`;
+}
+
+function generateBackgroundSeed() {
+    const randomSeed = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    if (usedBackgroundSeeds.includes(randomSeed)) {
+        return generateBackgroundSeed();
+    }
+    usedBackgroundSeeds.push(randomSeed);
+    if (usedBackgroundSeeds.length > 20) {
+        usedBackgroundSeeds = usedBackgroundSeeds.slice(-20);
+    }
+    return randomSeed;
+}
 
 function rotateLiveBackground() {
-    liveBackgroundIndex = (liveBackgroundIndex + 1) % liveBackgrounds.length;
-    const nextBackground = liveBackgrounds[liveBackgroundIndex];
+    const nextSeed = generateBackgroundSeed();
+    const nextBackground = buildRandomBackgroundImage(nextSeed);
     document.documentElement.style.setProperty("--live-background-image", nextBackground);
     document.body.style.backgroundImage = nextBackground;
 }
