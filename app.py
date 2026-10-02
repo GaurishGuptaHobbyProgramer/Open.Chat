@@ -10,14 +10,22 @@ from urllib import request as urllib_request
 try:
     from dotenv import load_dotenv
 except ImportError:  # pragma: no cover - optional dependency
-    def load_dotenv():
+    def load_dotenv(*args, **kwargs):
         return False
 
 from flask import Flask, g, current_app, has_app_context, jsonify, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
-load_dotenv()
+_project_root = os.path.dirname(os.path.abspath(__file__))
+_env_path = os.path.join(_project_root, ".env")
+if os.path.exists(_env_path):
+    with open(_env_path, "rb") as env_file:
+        env_bytes = env_file.read()
+    if env_bytes.startswith(b"\xef\xbb\xbf"):
+        with open(_env_path, "wb") as env_file:
+            env_file.write(env_bytes.lstrip(b"\xef\xbb\xbf"))
+load_dotenv(_env_path)
 
 
 def get_db():
