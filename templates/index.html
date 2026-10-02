@@ -3,49 +3,93 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OpenChat</title>
+    <title>Open.Chat | Communication</title>
+    <meta name="description" content="Open.Chat is a modern communication platform with personal chats, groups, status updates, media sharing, and the pinned ENORMOUS community space.">
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='openchat-logo.svg') }}">
     <link rel="apple-touch-icon" href="{{ url_for('static', filename='openchat-logo.svg') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-<body class="device-{{ device_type }}" data-device-type="{{ device_type }}" data-current-username="{{ current_user.username if current_user else 'Anonymous' }}">
+<body class="device-{{ device_type }}" data-device-type="{{ device_type }}" data-current-user-id="{{ current_user.id if current_user else '' }}" data-current-username="{{ current_user.username if current_user else 'Anonymous' }}" data-enormous-name="{{ enormous_space.name }}">
     <div class="ambient-backdrop" aria-hidden="true">
         <div class="backdrop-glow glow-one"></div>
         <div class="backdrop-glow glow-two"></div>
         <div class="backdrop-grid"></div>
     </div>
 
+    <div id="coming-soon-toast" class="coming-soon-toast" role="alert" aria-live="assertive">Under Development — Coming Soon</div>
+
     <aside class="ai-floating-panel" aria-label="AI model status">
-        <div class="ai-badge"><span class="ai-status-dot"></span>AI live vision</div>
-        <p>Adaptive ambient intelligence is online.</p>
+        <div class="ai-badge"><span class="ai-status-dot"></span>Open.Chat AI · {{ 'Available' if ai_enabled else 'Under Development' }}</div>
+        <p>{{ 'AI service enabled by server configuration.' if ai_enabled else 'Coming Soon. AI responses are disabled.' }}</p>
     </aside>
 
-    <div class="app-shell">
-        <div class="chat-container">
-            <header class="header">
-                <div class="brand-wrap">
-                    <div class="brand-icon" aria-label="OpenChat logo">
-                        <img src="{{ url_for('static', filename='openchat-logo.svg') }}" alt="OpenChat logo" />
+    <div class="app-shell openchat-dashboard">
+        <aside class="sidebar">
+            <div class="brand-block">
+                <div class="brand-icon" aria-label="OpenChat logo">
+                    <img src="{{ url_for('static', filename='openchat-logo.svg') }}" alt="OpenChat logo" />
+                </div>
+                <div class="brand-copy">
+                    <div class="brand-name">Open.Chat</div>
+                    <div class="brand-tagline">Communication that stays open</div>
+                </div>
+            </div>
+
+            <div class="user-profile-card">
+                <div class="profile-avatar-large">{{ current_user.username[:2]|upper }}</div>
+                <div>
+                    <div class="profile-name">{{ current_user.username }}</div>
+                    <div class="profile-status"><span class="online-dot"></span>Online</div>
+                </div>
+            </div>
+
+            <div class="quick-actions">
+                <button class="nav-action" type="button" data-action="new-chat">New chat</button>
+                <button class="nav-action" type="button" data-action="new-group">New group</button>
+                <button class="nav-action" type="button" data-action="calls">Calls</button>
+                <button class="nav-action" type="button" data-action="status">Status</button>
+                <a class="nav-action ai-trigger" href="{{ url_for('idle_ai_page') }}" aria-label="Open Open.Chat AI">OPEN.CHAT AI <span>COMING SOON</span></a>
+                {% if is_developer %}<a class="nav-action" href="{{ url_for('developer_control_center') }}">Developer Control Center</a>{% endif %}
+                <a class="nav-action" href="{{ url_for('settings_page') }}" aria-label="Open settings">Settings</a>
+            </div>
+
+            <label class="search-wrap" for="chat-search">
+                <span>Search</span>
+                <input id="chat-search" type="search" placeholder="Find a chat or contact" autocomplete="off">
+            </label>
+
+            <div class="chat-list" aria-label="Chat list">
+                <button class="chat-item pinned active" type="button" data-room="ENORMOUS" data-conversation-id="1" id="enormous-chat-item">
+                    <div class="chat-avatar enormous">E</div>
+                    <div class="chat-copy">
+                        <div class="chat-row">
+                            <strong>{{ enormous_space.name }}</strong>
+                            <span class="enormous-time">Now</span>
+                        </div>
+                        <small class="enormous-last-message">Official Open.Chat community space</small>
                     </div>
-                    <div class="brand-copy">
-                        <div class="brand-name">OpenChat</div>
-                        <div class="brand-tagline">Live community space</div>
+                    <span class="badge badge-primary">Pinned</span>
+                </button>
+                <div id="conversation-items-container" class="conversation-items-container"></div>
+            </div>
+
+        </aside>
+
+        <section class="conversation-panel">
+            <header class="conversation-header">
+                <div class="conversation-meta">
+                    <div class="conversation-avatar enormous">E</div>
+                    <div>
+                        <div class="conversation-name">{{ enormous_space.name }}</div>
+                        <div class="conversation-meta-row">
+                            <span class="online-dot"></span>Official Open.Chat space
+                        </div>
                     </div>
                 </div>
-
-                <div class="header-controls">
-                    {% if current_user %}
-                    <div class="account-chip">{{ current_user.username }}</div>
-                    {% endif %}
-                    <div id="online-users" class="online-users">🟢 0 online</div>
-                    <a class="settings-link" href="{{ url_for('settings_page') }}" aria-label="Open settings">⚙️ Settings</a>
-                    <button id="device-mode-toggle" class="device-mode-toggle" type="button" aria-label="Toggle between desktop and mobile mode">
-                        Mobile mode
-                    </button>
-                    <button id="theme-toggle" class="theme-toggle" aria-pressed="false" title="Toggle theme">
-                        <span class="moon">🌙</span>
-                        <span class="sun">☀️</span>
-                    </button>
+                <div class="conversation-tools">
+                    <button type="button" class="toolbar-button" data-action="calls" aria-label="Voice calls, under development" title="Voice calls · Under Development">Voice calls</button>
+                    <button type="button" class="toolbar-button" data-action="calls" aria-label="Video calls, under development" title="Video calls · Under Development">Video calls</button>
+                    <button type="button" class="toolbar-button" aria-label="Search in conversation, under development" title="Search in conversation · Under Development" disabled>Search</button>
                 </div>
             </header>
 
@@ -56,10 +100,44 @@
             <form class="input-area" id="message-form" enctype="multipart/form-data">
                 <label class="attachment-button" for="attachment-input" title="Attach a file">📎</label>
                 <input type="file" id="attachment-input" name="attachment" accept="*/*" hidden>
-                <input type="text" id="message-input" placeholder="Type your message..." autocomplete="off">
+                <input type="text" id="message-input" placeholder="Message {{ enormous_space.name }}" autocomplete="off">
                 <button id="send-button" type="submit">Send</button>
             </form>
-        </div>
+        </section>
+
+        <aside class="info-panel">
+            <div class="info-card">
+                <div class="info-header">ENORMOUS</div>
+                <div class="info-summary">
+                    <div class="info-avatar enormous">E</div>
+                    <div>
+                        <strong>Official Open.Chat space</strong>
+                        <p>Permanent, pinned, and always visible.</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="info-card compact">
+                <h3>Overview</h3>
+                <ul>
+                    <li>Personal chats</li>
+                    <li>Group chats</li>
+                    <li>Media sharing</li>
+                    <li>Real-time updates</li>
+                </ul>
+            </div>
+
+            <div class="info-card compact">
+                <h3>Platform</h3>
+                <ul>
+                    <li>Open.Chat AI: Under Development</li>
+                    <li>Voice and video calls: Under Development</li>
+                    <li>Search: available</li>
+                    <li>Privacy: Under Development</li>
+                </ul>
+                <p>Advanced privacy and encryption features are not available yet.</p>
+            </div>
+        </aside>
     </div>
 
     <script src="{{ url_for('static', filename='script.js') }}"></script>

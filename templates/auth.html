@@ -15,8 +15,8 @@
     </div>
 
     <aside class="ai-floating-panel ai-floating-panel-inline" aria-label="AI model status">
-        <div class="ai-badge"><span class="ai-status-dot"></span>AI live vision</div>
-        <p>Personalized conversations with a living backdrop.</p>
+        <div class="ai-badge"><span class="ai-status-dot"></span>Open.Chat AI · {{ 'Available' if ai_enabled else 'Under Development' }}</div>
+        <p>{{ 'AI service enabled by server configuration.' if ai_enabled else 'Coming Soon. AI responses are disabled.' }}</p>
     </aside>
 
     <div class="auth-shell">

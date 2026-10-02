@@ -15,8 +15,8 @@
     </div>
 
     <aside class="ai-floating-panel ai-floating-panel-inline" aria-label="AI model status">
-        <div class="ai-badge"><span class="ai-status-dot"></span>AI live vision</div>
-        <p>Ambient visuals tuned for focus and calm.</p>
+        <div class="ai-badge"><span class="ai-status-dot"></span>Open.Chat AI · {{ 'Available' if ai_enabled else 'Under Development' }}</div>
+        <p>{{ 'AI service enabled by server configuration.' if ai_enabled else 'Coming Soon. AI responses are disabled.' }}</p>
     </aside>
 
     <div class="settings-shell">
@@ -36,9 +36,32 @@
                     <div class="profile-card">
                         <div class="profile-avatar">{{ current_user.username[:2]|upper }}</div>
                         <div class="profile-details">
-                            <strong>{{ current_user.username }}</strong>
+                            <strong>{{ profile.display_name if profile else current_user.username }}</strong>
+                            <span>@{{ current_user.username }}</span>
                         </div>
                     </div>
+                    <div class="settings-links-row">
+                        <a href="{{ url_for('profile_page') }}" class="primary-button settings-button">Edit profile</a>
+                    </div>
+                </section>
+
+                <section class="settings-section">
+                    <h2>Profile</h2>
+                    <form method="post" action="{{ url_for('settings_page') }}" class="idle-ai-settings-form">
+                        <label>
+                            Display name
+                            <input type="text" name="display_name" value="{{ profile.display_name if profile else current_user.username }}" maxlength="60">
+                        </label>
+                        <label>
+                            About / bio
+                            <textarea name="bio" rows="3" maxlength="200">{{ profile.bio if profile else '' }}</textarea>
+                        </label>
+                        <label>
+                            Status
+                            <input type="text" name="status" value="{{ profile.status if profile else 'Available' }}" maxlength="80">
+                        </label>
+                        <button type="submit" class="primary-button settings-button">Save profile</button>
+                    </form>
                 </section>
 
                 <section class="settings-section">
@@ -55,8 +78,32 @@
                 {% endif %}
 
                 <section class="settings-section">
-                    <h2>Other</h2>
-                    <div class="placeholder-setting">More settings can be added here later.</div>
+                    <h2>Idle AI</h2>
+                    {% if ai_enabled %}
+                    <form method="post" action="{{ url_for('settings_page') }}" class="idle-ai-settings-form">
+                        <label>
+                            Bot name
+                            <input type="text" name="chatbot_name" value="{{ idle_settings.name }}" maxlength="60">
+                        </label>
+                        <label>
+                            Personality
+                            <input type="text" name="chatbot_personality" value="{{ idle_settings.personality }}" maxlength="120">
+                        </label>
+                        <label>
+                            Greeting
+                            <textarea name="chatbot_greeting" rows="3" maxlength="220">{{ idle_settings.greeting }}</textarea>
+                        </label>
+                        <button type="submit" class="primary-button settings-button">Save Idle AI settings</button>
+                        {% if saved_message %}
+                        <p class="form-success">{{ saved_message }}</p>
+                        {% endif %}
+                    </form>
+                    <a href="{{ url_for('idle_ai_page') }}" class="primary-button settings-button">Open Idle AI chat</a>
+                    {% else %}
+                    <p class="placeholder-setting"><strong>Under Development — Coming Soon</strong><br>AI settings and responses are unavailable until the service is enabled with a configured API key.</p>
+                    {% if saved_message %}<p class="form-success">{{ saved_message }}</p>{% endif %}
+                    <a href="{{ url_for('idle_ai_page') }}" class="primary-button settings-button">Open AI status</a>
+                    {% endif %}
                 </section>
             </div>
         </div>

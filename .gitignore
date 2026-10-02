@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+chat.db
+*.sqlite
+*.sqlite3
+db_dump.txt
+output.txt

@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Developer Control Center | Open.Chat</title>
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='openchat-logo.svg') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="developer-page">
+    <header class="developer-header">
+        <a class="developer-brand" href="{{ url_for('home') }}">
+            <img src="{{ url_for('static', filename='openchat-logo.svg') }}" alt="">
+            <span>Open.Chat <small>Developer Control Center</small></span>
+        </a>
+        <div class="developer-header-actions">
+            <span>Signed in as {{ current_user.username }}</span>
+            <a href="{{ url_for('home') }}">Open chat</a>
+            <form method="post" action="{{ url_for('logout_page') }}"><button type="submit">Log out</button></form>
+        </div>
+    </header>
+
+    <main class="developer-main">
+        <div class="developer-disclosure" role="note">
+            <strong>Server-side message access</strong>
+            <p>Open.Chat does not currently provide end-to-end encryption. Messages are readable by this server and visible in this control center. Do not treat chats as confidential.</p>
+        </div>
+
+        <section class="developer-section" aria-labelledby="system-heading">
+            <div class="developer-section-heading">
+                <div><p class="eyebrow">Operations</p><h1 id="system-heading">System overview</h1></div>
+                <span id="system-health" class="developer-state">Loading</span>
+            </div>
+            <div id="system-summary" class="developer-summary" aria-live="polite"></div>
+            <div id="table-counts" class="developer-counts"></div>
+        </section>
+
+        <section class="developer-section" aria-labelledby="accounts-heading">
+            <div class="developer-section-heading"><div><p class="eyebrow">People</p><h2 id="accounts-heading">Accounts</h2></div><span id="account-count" class="developer-state">Loading</span></div>
+            <div class="developer-table-wrap">
+                <table><thead><tr><th>ID</th><th>Username</th><th>Display name</th><th>Created</th><th>Profile status</th><th>Account state</th><th>Developer</th><th>Presence / activity</th></tr></thead><tbody id="accounts-rows"><tr><td colspan="8">Loading accounts...</td></tr></tbody></table>
+            </div>
+            <p class="developer-note">Account suspension, per-account online status, and last activity are not tracked by the current application schema.</p>
+        </section>
+
+        <section class="developer-section" aria-labelledby="conversations-heading">
+            <div class="developer-section-heading"><div><p class="eyebrow">Messaging</p><h2 id="conversations-heading">Conversations</h2></div><span id="conversation-count" class="developer-state">Loading</span></div>
+            <div class="developer-table-wrap">
+                <table><thead><tr><th>ID</th><th>Type</th><th>Name</th><th>Members</th><th>Messages</th><th>Last activity</th><th></th></tr></thead><tbody id="conversation-rows"><tr><td colspan="7">Loading conversations...</td></tr></tbody></table>
+            </div>
+            <p class="developer-note">Inspection is read-only. Message previews and message bodies are server-visible because end-to-end encryption is not implemented.</p>
+        </section>
+
+        <section class="developer-section developer-message-section" aria-labelledby="message-heading">
+            <div class="developer-section-heading"><div><p class="eyebrow">Conversation inspection</p><h2 id="message-heading">Messages</h2></div><span id="selected-conversation" class="developer-state">Select a conversation</span></div>
+            <div class="developer-table-wrap">
+                <table><thead><tr><th>Timestamp</th><th>Sender → Recipient</th><th>Message</th></tr></thead><tbody id="message-rows"><tr><td colspan="3">Choose Inspect on a conversation above.</td></tr></tbody></table>
+            </div>
+            <p id="message-limit-note" class="developer-note"></p>
+        </section>
+
+        <section class="developer-section" aria-labelledby="events-heading">
+            <div class="developer-section-heading"><div><p class="eyebrow">Diagnostics</p><h2 id="events-heading">Recent application events</h2></div><span id="event-count" class="developer-state">Loading</span></div>
+            <div class="developer-table-wrap">
+                <table><thead><tr><th>Timestamp</th><th>Kind</th><th>Endpoint</th><th>HTTP</th><th>User ID</th><th>Detail</th></tr></thead><tbody id="event-rows"><tr><td colspan="6">Loading events...</td></tr></tbody></table>
+            </div>
+            <p class="developer-note">The event trail records failed HTTP requests and selected application actions. Tracebacks remain in the deployment host logs; credentials and request bodies are not captured here.</p>
+        </section>
+    </main>
+    <script src="{{ url_for('static', filename='developer.js') }}"></script>
+</body>
+</html>
