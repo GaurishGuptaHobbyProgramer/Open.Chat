@@ -3098,6 +3098,29 @@ def create_app(test_config=None):
         ensure_notification_tables()
         ensure_application_event_table()
         migrate_legacy_messages()
+        if app.config.get("APP_ENV") in {"production", "prod"}:
+            developer_ids = get_configured_developer_user_ids()
+            if not developer_ids:
+                app.logger.warning(
+                    "OPENCHAT_DEVELOPER_USER_ID is not configured with a valid user ID; "
+                    "developer control-center access is unavailable."
+                )
+            else:
+                placeholders = ",".join("?" for _ in developer_ids)
+                existing_ids = {
+                    row["id"]
+                    for row in get_db().execute(
+                        f"SELECT id FROM users WHERE id IN ({placeholders})",
+                        tuple(sorted(developer_ids)),
+                    ).fetchall()
+                }
+                missing_ids = sorted(developer_ids - existing_ids)
+                if missing_ids:
+                    app.logger.warning(
+                        "Configured developer account IDs are not present in the deployment database: %s. "
+                        "Create those accounts on the deployed site and configure their deployed user IDs.",
+                        missing_ids,
+                    )
 
     return app
 

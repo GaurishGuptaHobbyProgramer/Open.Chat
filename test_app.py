@@ -119,6 +119,20 @@ class ChatDatabaseTest(unittest.TestCase):
             production_app = create_app({"TESTING": True, "DATABASE": self.db_path, "DEBUG": True})
             self.assertFalse(production_app.debug)
 
+    def test_production_warns_when_developer_id_is_missing_from_database(self):
+        with patch.dict(
+            os.environ,
+            {"APP_ENV": "production", "SECRET_KEY": "configured-test-secret"},
+            clear=False,
+        ):
+            with self.assertLogs("app", level="WARNING") as captured:
+                create_app({
+                    "TESTING": True,
+                    "DATABASE": self.db_path,
+                    "OPENCHAT_DEVELOPER_USER_ID": "999999",
+                })
+        self.assertTrue(any("not present in the deployment database" in message for message in captured.output))
+
     def test_chat_requires_login(self):
         client = self.app.test_client()
         self.assertEqual(client.get("/").status_code, 302)
