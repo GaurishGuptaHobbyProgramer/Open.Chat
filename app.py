@@ -515,20 +515,154 @@ def add_group_member(conversation_id, user_id):
 
 
 def create_call_session(caller_id, target_id=None, mode="audio", conversation_id=None):
-    raise ValueError("Voice and video calls are under development")
+    if mode not in {"audio", "video"}:
+        raise ValueError("Call mode must be audio or video")
+    if caller_id is None or target_id is None or caller_id == target_id:
+        raise ValueError("A call requires another user")
+
+    db = get_db()
+    if conversation_id is None:
+        conversation = db.execute(
+            """
+            SELECT c.id FROM conversations c
+            JOIN conversation_members caller ON caller.conversation_id = c.id AND caller.user_id = ?
+            JOIN conversation_members target ON target.conversation_id = c.id AND target.user_id = ?
+            WHERE c.kind = 'direct'
+            LIMIT 1
+            """,
+            (caller_id, target_id),
+        ).fetchone()
+        conversation_id = conversation["id"] if conversation else None
+
+    conversation = db.execute(
+        "SELECT kind FROM conversations WHERE id = ?",
+        (conversation_id,),
+    ).fetchone()
+    if conversation is None or conversation["kind"] != "direct":
+        raise ValueError("Calls are available only in direct chats")
+
+    members = db.execute(
+        "SELECT user_id FROM conversation_members WHERE conversation_id = ? AND user_id IN (?, ?)",
+        (conversation_id, caller_id, target_id),
+    ).fetchall()
+    if len(members) != 2:
+        raise ValueError("Both users must belong to the direct chat")
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ringing_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    db.execute(
+        "UPDATE call_sessions SET status = 'missed', updated_at = ? WHERE status = 'ringing' AND updated_at < ?",
+        (now, ringing_cutoff),
+    )
+    active_call = db.execute(
+        """
+        SELECT id FROM call_sessions
+        WHERE status IN ('ringing', 'accepted')
+                    AND (caller_id IN (?, ?) OR target_id IN (?, ?))
+        LIMIT 1
+        """,
+                (caller_id, target_id, caller_id, target_id),
+    ).fetchone()
+    if active_call:
+                raise ValueError("A participant is already in an active call")
+
+    cursor = db.execute(
+        """
+        INSERT INTO call_sessions (caller_id, target_id, conversation_id, mode, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'ringing', ?, ?)
+        """,
+        (caller_id, target_id, conversation_id, mode, now, now),
+    )
+    db.commit()
+    return {
+        "id": cursor.lastrowid,
+        "caller_id": caller_id,
+        "target_id": target_id,
+        "conversation_id": conversation_id,
+        "mode": mode,
+        "status": "ringing",
+        "created_at": now,
+        "updated_at": now,
+    }
 
 
 def update_call_status(call_id, status):
-    raise ValueError("Voice and video calls are under development")
+    if status not in {"accepted", "rejected", "ended", "cancelled", "missed"}:
+        raise ValueError("Invalid call status")
+    db = get_db()
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cursor = db.execute(
+        "UPDATE call_sessions SET status = ?, updated_at = ? WHERE id = ? AND status IN ('ringing', 'accepted')",
+        (status, now, call_id),
+    )
+    db.commit()
+    return cursor.rowcount > 0
 
 
 
 def save_call_signal(session_id, sender_id, target_id, signal_type, payload):
-    raise ValueError("Voice and video calls are under development")
+    if signal_type not in {"offer", "answer", "ice-candidate"}:
+        raise ValueError("Invalid call signal type")
+    if not isinstance(payload, dict) or len(json.dumps(payload)) > 65536:
+        raise ValueError("Call signal payload must be a JSON object under 64 KB")
+
+    db = get_db()
+    call = db.execute(
+        "SELECT caller_id, target_id FROM call_sessions WHERE id = ? AND status IN ('ringing', 'accepted')",
+        (session_id,),
+    ).fetchone()
+    if call is None or {sender_id, target_id} != {call["caller_id"], call["target_id"]} or sender_id == target_id:
+        raise ValueError("Call session not found or users are not call participants")
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cursor = db.execute(
+        "INSERT INTO call_signals (call_id, sender_id, target_id, signal_type, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (session_id, sender_id, target_id, signal_type, json.dumps(payload), now),
+    )
+    db.commit()
+    return {"id": cursor.lastrowid, "created_at": now}
 
 
 def get_call_signals(session_id, user_id, after_id=0):
-    return []
+    rows = get_db().execute(
+        """
+        SELECT id, sender_id, signal_type, payload, created_at
+        FROM call_signals
+        WHERE call_id = ? AND target_id = ? AND id > ?
+        ORDER BY id ASC
+        LIMIT 100
+        """,
+        (session_id, user_id, max(0, int(after_id or 0))),
+    ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "sender_id": row["sender_id"],
+            "signal_type": row["signal_type"],
+            "payload": json.loads(row["payload"]),
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
+def get_call_ice_servers():
+    try:
+        servers = json.loads(os.getenv("CALL_ICE_SERVERS", "[]"))
+    except json.JSONDecodeError:
+        if has_app_context():
+            current_app.logger.warning("CALL_ICE_SERVERS must be a JSON array")
+        return []
+    if not isinstance(servers, list):
+        if has_app_context():
+            current_app.logger.warning("CALL_ICE_SERVERS must be a JSON array")
+        return []
+    return [
+        server for server in servers
+        if isinstance(server, dict)
+        and (isinstance(server.get("urls"), str) or isinstance(server.get("urls"), list))
+        and server.get("urls")
+    ]
 
 
 def ensure_call_tables():
@@ -550,6 +684,23 @@ def ensure_call_tables():
         )
         """
     )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS call_signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            call_id INTEGER NOT NULL,
+            sender_id INTEGER NOT NULL,
+            target_id INTEGER NOT NULL,
+            signal_type TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(call_id) REFERENCES call_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY(sender_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(target_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS idx_call_signals_recipient ON call_signals(call_id, target_id, id)")
     db.commit()
 
 
@@ -752,6 +903,10 @@ def ensure_conversation_message_tables():
     }.items():
         if column_name not in message_columns:
             db.execute(f"ALTER TABLE conversation_messages ADD COLUMN {column_name} {column_type}")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_conversation_messages_conversation_id_id "
+        "ON conversation_messages(conversation_id, id)"
+    )
 
     db.execute(
         """
@@ -1797,6 +1952,7 @@ def create_app(test_config=None):
             enormous_space=enormous_space,
             ai_enabled=is_ai_enabled(),
             is_developer=is_developer_user(current_user),
+            call_ice_servers=get_call_ice_servers(),
         )
 
     @app.route("/developer", methods=["GET"])
@@ -2287,7 +2443,7 @@ def create_app(test_config=None):
             return jsonify({"error": "Conversation not found"}), 404
 
         since_id = request.args.get("since_id", type=int)
-        limit = request.args.get("limit", default=80, type=int)
+        limit = max(1, min(request.args.get("limit", default=80, type=int), 100))
         return jsonify(get_conversation_messages(conversation_id, user_id=current_user["id"], limit=limit, since_id=since_id))
 
     @app.route("/api/conversations/<int:conversation_id>/messages", methods=["POST"])
@@ -2362,14 +2518,105 @@ def create_app(test_config=None):
         current_user = get_current_user()
         if current_user is None:
             return jsonify({"error": "Authentication required"}), 401
-        return jsonify({"error": "Voice and video calls are under development", "feature_state": "under_development"}), 501
+
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({"error": "Request body must be a JSON object"}), 400
+        try:
+            call = create_call_session(
+                current_user["id"],
+                data.get("target_user_id"),
+                data.get("mode", "audio"),
+                data.get("conversation_id"),
+            )
+        except (TypeError, ValueError) as exc:
+            return jsonify({"error": str(exc)}), 400
+        current_app.logger.debug("Call %s started by user %s", call["id"], current_user["id"])
+        return jsonify(call), 201
+
+    @app.route("/api/calls", methods=["GET"])
+    def api_list_active_calls():
+        current_user = get_current_user()
+        if current_user is None:
+            return jsonify({"error": "Authentication required"}), 401
+        rows = get_db().execute(
+            """
+            SELECT c.id, c.caller_id, c.target_id, c.conversation_id, c.mode, c.status,
+                   c.created_at, caller.username AS caller_username
+            FROM call_sessions c
+            JOIN users caller ON caller.id = c.caller_id
+            WHERE c.status IN ('ringing', 'accepted')
+              AND (c.caller_id = ? OR c.target_id = ?)
+            ORDER BY c.id DESC
+            LIMIT 20
+            """,
+            (current_user["id"], current_user["id"]),
+        ).fetchall()
+        return jsonify([dict(row) for row in rows])
+
+    @app.route("/api/calls/<int:call_id>", methods=["GET"])
+    def api_get_call(call_id):
+        current_user = get_current_user()
+        if current_user is None:
+            return jsonify({"error": "Authentication required"}), 401
+        call = get_db().execute(
+            "SELECT id, caller_id, target_id, conversation_id, mode, status, created_at, updated_at FROM call_sessions WHERE id = ? AND (caller_id = ? OR target_id = ?)",
+            (call_id, current_user["id"], current_user["id"]),
+        ).fetchone()
+        if call is None:
+            return jsonify({"error": "Call not found"}), 404
+        return jsonify(dict(call))
+
+    @app.route("/api/calls/<int:call_id>/signals", methods=["GET", "POST"])
+    def api_call_signals(call_id):
+        current_user = get_current_user()
+        if current_user is None:
+            return jsonify({"error": "Authentication required"}), 401
+        db = get_db()
+        call = db.execute(
+            "SELECT caller_id, target_id FROM call_sessions WHERE id = ? AND (caller_id = ? OR target_id = ?)",
+            (call_id, current_user["id"], current_user["id"]),
+        ).fetchone()
+        if call is None:
+            return jsonify({"error": "Call not found"}), 404
+        if request.method == "GET":
+            after_id = max(0, request.args.get("after_id", default=0, type=int))
+            return jsonify(get_call_signals(call_id, current_user["id"], after_id))
+
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({"error": "Request body must be a JSON object"}), 400
+        target_id = call["target_id"] if current_user["id"] == call["caller_id"] else call["caller_id"]
+        try:
+            signal = save_call_signal(call_id, current_user["id"], target_id, data.get("signal_type"), data.get("payload"))
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify(signal), 201
 
     @app.route("/api/calls/<int:call_id>/status", methods=["POST"])
     def api_update_call_status(call_id):
         current_user = get_current_user()
         if current_user is None:
             return jsonify({"error": "Authentication required"}), 401
-        return jsonify({"error": "Voice and video calls are under development", "feature_state": "under_development"}), 501
+        call = get_db().execute(
+            "SELECT caller_id, target_id, status FROM call_sessions WHERE id = ? AND (caller_id = ? OR target_id = ?)",
+            (call_id, current_user["id"], current_user["id"]),
+        ).fetchone()
+        if call is None:
+            return jsonify({"error": "Call not found"}), 404
+        data = request.get_json(silent=True) or {}
+        status = data.get("status") if isinstance(data, dict) else None
+        if status in {"accepted", "rejected"} and current_user["id"] != call["target_id"]:
+            return jsonify({"error": "Only the recipient can answer an incoming call"}), 403
+        if status == "cancelled" and current_user["id"] != call["caller_id"]:
+            return jsonify({"error": "Only the caller can cancel the outgoing call"}), 403
+        if status in {"accepted", "rejected", "cancelled"} and call["status"] != "ringing":
+            return jsonify({"error": "Only ringing calls can be answered or cancelled"}), 409
+        try:
+            changed = update_call_status(call_id, status)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify({"success": changed, "status": status})
 
     @app.route("/api/notifications", methods=["GET"])
     def api_notifications():

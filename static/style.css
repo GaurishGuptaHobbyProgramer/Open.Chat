@@ -1,5 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-
 :root {
     --bg-1: #07111f;
     --bg-2: #101b2d;
@@ -22,8 +20,7 @@
     --text-glow-alt: rgba(96, 165, 250, 0.52);
     --avatar-bg: linear-gradient(135deg, #6ee7b7, #3b82f6);
     --avatar-own: linear-gradient(135deg, #a7f3d0, #34d399);
-    --live-background-image: linear-gradient(135deg, rgba(8, 15, 29, 0.7), rgba(21, 41, 70, 0.56)),
-        url('https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=1800&q=80');
+    --live-background-image: linear-gradient(135deg, #07111f 0%, #101b2d 52%, #17334a 100%);
 }
 
 .light-theme {
@@ -48,8 +45,7 @@
     --text-glow-alt: rgba(45, 212, 191, 0.24);
     --avatar-bg: linear-gradient(135deg, #62d0ff, #2f80ed);
     --avatar-own: linear-gradient(135deg, #9ae6b4, #2bb673);
-    --live-background-image: linear-gradient(135deg, rgba(239, 246, 255, 0.72), rgba(191, 219, 254, 0.62)),
-        url('https://images.unsplash.com/photo-1526379095098-d400fd0bf935?auto=format&fit=crop&w=1800&q=80');
+    --live-background-image: linear-gradient(135deg, #eef4ff 0%, #dfeafe 56%, #c7e8ec 100%);
 }
 
 * {
@@ -92,8 +88,7 @@ body {
     background-image: var(--live-background-image);
     background-size: cover;
     background-position: center;
-    background-attachment: fixed;
-    transition: background-image 0.9s ease;
+    background-attachment: scroll;
 }
 
 body::before {
@@ -103,11 +98,9 @@ body::before {
     background: var(--live-background-image);
     background-size: cover;
     background-position: center;
-    filter: blur(12px) brightness(0.7) saturate(1.35);
-    transform: scale(1.12);
+    filter: none;
     z-index: -2;
-    opacity: 0.82;
-    animation: backgroundShift 18s ease-in-out infinite alternate;
+    opacity: 0;
 }
 
 body::after {
@@ -131,9 +124,9 @@ body::after {
 .backdrop-glow {
     position: absolute;
     border-radius: 50%;
-    filter: blur(70px);
+    filter: blur(32px);
     opacity: 0.7;
-    animation: pulseGlow 8s ease-in-out infinite alternate;
+    animation: none;
 }
 
 .glow-one {
@@ -150,7 +143,7 @@ body::after {
     right: -6rem;
     bottom: 8%;
     background: rgba(45, 212, 191, 0.28);
-    animation-delay: 1.5s;
+    animation: none;
 }
 
 .backdrop-grid {
@@ -1949,5 +1942,127 @@ body.device-mobile .device-mode-toggle {
 
     .conversation-name {
         font-size: 0.94rem;
+    }
+}
+
+.call-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 300;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: rgba(2, 6, 23, 0.82);
+    backdrop-filter: blur(8px);
+}
+
+.call-overlay.visible {
+    display: flex;
+}
+
+.call-panel {
+    width: min(900px, 100%);
+    max-height: 92vh;
+    overflow: auto;
+    border: 1px solid rgba(148, 163, 184, 0.28);
+    border-radius: 16px;
+    padding: 18px;
+    color: #f8fafc;
+    background: #111827;
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.48);
+}
+
+.call-panel-header,
+.call-controls,
+.call-incoming-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.call-panel-header h2,
+.call-panel-header p {
+    margin: 0;
+}
+
+.call-panel-header h2 {
+    font-size: 1.1rem;
+}
+
+.call-panel-header p {
+    margin-top: 4px;
+    color: #cbd5e1;
+    font-size: 0.88rem;
+}
+
+.call-media {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(150px, 0.34fr);
+    gap: 10px;
+    margin: 16px 0;
+}
+
+.call-media video {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    object-fit: cover;
+    border-radius: 10px;
+    background: #030712;
+}
+
+.call-media audio {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+}
+
+.call-overlay.audio-only .call-media {
+    display: none;
+}
+
+.call-controls,
+.call-incoming-actions {
+    justify-content: center;
+    padding-top: 12px;
+}
+
+.call-controls button,
+.call-incoming-actions button,
+.call-end-button {
+    min-height: 40px;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    border-radius: 8px;
+    padding: 8px 14px;
+    color: #f8fafc;
+    background: #263449;
+    cursor: pointer;
+}
+
+.call-incoming-actions [data-call-answer] {
+    background: #15803d;
+}
+
+.call-incoming-actions [data-call-decline],
+.call-end-button {
+    background: #b91c1c;
+}
+
+@media (max-width: 560px) {
+    .call-panel {
+        padding: 14px;
+    }
+
+    .call-media {
+        grid-template-columns: 1fr;
+    }
+
+    .call-media video:nth-of-type(2) {
+        width: 42%;
+        position: absolute;
+        right: 26px;
+        bottom: 110px;
     }
 }

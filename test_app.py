@@ -433,29 +433,112 @@ class ChatDatabaseTest(unittest.TestCase):
             self.assertEqual(voice["attachment_type"], "audio/ogg")
             self.assertIn("voice.ogg", voice["attachment_name"])
 
-            with self.assertRaisesRegex(ValueError, "under development"):
-                create_call_session(alice["id"], bob["id"], "audio")
+            call = create_call_session(alice["id"], bob["id"], "audio", chat_id)
+            self.assertEqual(call["status"], "ringing")
+            self.assertEqual(call["conversation_id"], chat_id)
 
     def test_call_signaling_messages_are_stored_and_retrieved(self):
         with self.app.app_context(), self.app.test_request_context("/"):
-            with self.assertRaisesRegex(ValueError, "under development"):
-                save_call_signal(1, 1, 2, "offer", {"sdp": "ignored"})
-            self.assertEqual(get_call_signals(1, 2), [])
+            alice = register_user("Alice", "StrongPass123!")
+            bob = register_user("Bob", "AnotherPass456!")
+            chat_id = create_direct_chat(alice["id"], bob["id"])
+            call = create_call_session(alice["id"], bob["id"], "video", chat_id)
 
-    def test_call_api_is_explicitly_under_development(self):
-        client = self.app.test_client()
+            signal = save_call_signal(call["id"], alice["id"], bob["id"], "offer", {"sdp": "offer-sdp"})
+
+            self.assertGreater(signal["id"], 0)
+            self.assertEqual(get_call_signals(call["id"], bob["id"])[0]["payload"]["sdp"], "offer-sdp")
+            self.assertEqual(get_call_signals(call["id"], alice["id"]), [])
+
+    def test_participant_cannot_join_overlapping_calls(self):
         with self.app.app_context(), self.app.test_request_context("/"):
             alice = register_user("Alice", "StrongPass123!")
+            bob = register_user("Bob", "AnotherPass456!")
+            carol = register_user("Carol", "ThirdPass789!")
+            alice_bob_chat = create_direct_chat(alice["id"], bob["id"])
+            bob_carol_chat = create_direct_chat(bob["id"], carol["id"])
+            create_call_session(alice["id"], bob["id"], "audio", alice_bob_chat)
 
-        with client.session_transaction() as session:
+            with self.assertRaisesRegex(ValueError, "already in an active call"):
+                create_call_session(bob["id"], carol["id"], "audio", bob_carol_chat)
+
+    def test_call_api_starts_and_answers_authenticated_calls(self):
+        alice_client = self.app.test_client()
+        bob_client = self.app.test_client()
+        with self.app.app_context(), self.app.test_request_context("/"):
+            alice = register_user("Alice", "StrongPass123!")
+            bob = register_user("Bob", "AnotherPass456!")
+            chat_id = create_direct_chat(alice["id"], bob["id"])
+
+        with alice_client.session_transaction() as session:
             session["user_id"] = alice["id"]
+        with bob_client.session_transaction() as session:
+            session["user_id"] = bob["id"]
 
-        start = client.post("/api/calls/start", json={"target_user_id": 2})
-        status = client.post("/api/calls/999/status", json={"status": "accepted"})
-        self.assertEqual(start.status_code, 501)
-        self.assertEqual(status.status_code, 501)
-        self.assertEqual(start.get_json()["feature_state"], "under_development")
-        self.assertEqual(status.get_json()["feature_state"], "under_development")
+        start = alice_client.post("/api/calls/start", json={
+            "target_user_id": bob["id"],
+            "conversation_id": chat_id,
+            "mode": "audio",
+        })
+        call = start.get_json()
+        self.assertEqual(start.status_code, 201)
+        self.assertEqual(call["mode"], "audio")
+
+        signal = alice_client.post(
+            f"/api/calls/{call['id']}/signals",
+            json={"signal_type": "offer", "payload": {"sdp": "offer-sdp"}},
+        )
+        received = bob_client.get(f"/api/calls/{call['id']}/signals").get_json()
+        accepted = bob_client.post(f"/api/calls/{call['id']}/status", json={"status": "accepted"})
+        answer = bob_client.post(
+            f"/api/calls/{call['id']}/signals",
+            json={"signal_type": "answer", "payload": {"sdp": "answer-sdp"}},
+        )
+        candidate = alice_client.post(
+            f"/api/calls/{call['id']}/signals",
+            json={"signal_type": "ice-candidate", "payload": {"candidate": "candidate"}},
+        )
+        caller_signals = alice_client.get(f"/api/calls/{call['id']}/signals").get_json()
+        callee_signals = bob_client.get(
+            f"/api/calls/{call['id']}/signals?after_id={received[0]['id']}"
+        ).get_json()
+        rejected_after_answer = bob_client.post(
+            f"/api/calls/{call['id']}/status", json={"status": "rejected"}
+        )
+        ended = bob_client.post(f"/api/calls/{call['id']}/status", json={"status": "ended"})
+
+        self.assertEqual(signal.status_code, 201)
+        self.assertEqual(received[0]["payload"]["sdp"], "offer-sdp")
+        self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(answer.status_code, 201)
+        self.assertEqual(caller_signals[0]["payload"]["sdp"], "answer-sdp")
+        self.assertEqual(candidate.status_code, 201)
+        self.assertEqual(callee_signals[0]["signal_type"], "ice-candidate")
+        self.assertEqual(rejected_after_answer.status_code, 409)
+        self.assertEqual(ended.status_code, 200)
+        self.assertEqual(bob_client.get(f"/api/calls/{call['id']}").get_json()["status"], "ended")
+
+        rejected_call = alice_client.post("/api/calls/start", json={
+            "target_user_id": bob["id"],
+            "conversation_id": chat_id,
+            "mode": "audio",
+        }).get_json()
+        rejected = bob_client.post(
+            f"/api/calls/{rejected_call['id']}/status", json={"status": "rejected"}
+        )
+        self.assertEqual(rejected.status_code, 200)
+        self.assertEqual(alice_client.get(f"/api/calls/{rejected_call['id']}").get_json()["status"], "rejected")
+
+        cancelled_call = alice_client.post("/api/calls/start", json={
+            "target_user_id": bob["id"],
+            "conversation_id": chat_id,
+            "mode": "audio",
+        }).get_json()
+        cancelled = alice_client.post(
+            f"/api/calls/{cancelled_call['id']}/status", json={"status": "cancelled"}
+        )
+        self.assertEqual(cancelled.status_code, 200)
+        self.assertEqual(bob_client.get(f"/api/calls/{cancelled_call['id']}").get_json()["status"], "cancelled")
 
     def test_notifications_are_created_and_can_be_marked_read(self):
         with self.app.app_context(), self.app.test_request_context("/"):

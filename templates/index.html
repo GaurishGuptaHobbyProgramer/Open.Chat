@@ -9,7 +9,7 @@
     <link rel="apple-touch-icon" href="{{ url_for('static', filename='openchat-logo.svg') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-<body class="device-{{ device_type }}" data-device-type="{{ device_type }}" data-current-user-id="{{ current_user.id if current_user else '' }}" data-current-username="{{ current_user.username if current_user else 'Anonymous' }}" data-enormous-name="{{ enormous_space.name }}">
+<body class="device-{{ device_type }}" data-device-type="{{ device_type }}" data-current-user-id="{{ current_user.id if current_user else '' }}" data-current-username="{{ current_user.username if current_user else 'Anonymous' }}" data-enormous-name="{{ enormous_space.name }}" data-call-ice-servers='{{ call_ice_servers|tojson|forceescape }}'>
     <div class="ambient-backdrop" aria-hidden="true">
         <div class="backdrop-glow glow-one"></div>
         <div class="backdrop-glow glow-two"></div>
@@ -87,8 +87,8 @@
                     </div>
                 </div>
                 <div class="conversation-tools">
-                    <button type="button" class="toolbar-button" data-action="calls" aria-label="Voice calls, under development" title="Voice calls · Under Development">Voice calls</button>
-                    <button type="button" class="toolbar-button" data-action="calls" aria-label="Video calls, under development" title="Video calls · Under Development">Video calls</button>
+                    <button type="button" class="toolbar-button" data-call-mode="audio" aria-label="Start voice call" title="Start voice call">Voice call</button>
+                    <button type="button" class="toolbar-button" data-call-mode="video" aria-label="Start video call" title="Start video call">Video call</button>
                     <button type="button" class="toolbar-button" aria-label="Search in conversation, under development" title="Search in conversation · Under Development" disabled>Search</button>
                 </div>
             </header>
@@ -131,7 +131,7 @@
                 <h3>Platform</h3>
                 <ul>
                     <li>Open.Chat AI: Under Development</li>
-                    <li>Voice and video calls: Under Development</li>
+                    <li>Voice and video calls</li>
                     <li>Search: available</li>
                     <li>Privacy: Under Development</li>
                 </ul>
