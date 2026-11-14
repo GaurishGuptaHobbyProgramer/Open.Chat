@@ -1,0 +1,78 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Open.Chat: Flask app (debug)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "flask",
+            "args": [
+                "run",
+                "--host=127.0.0.1",
+                "--port=5000",
+                "--no-reload"
+            ],
+            "cwd": "${workspaceFolder}",
+            "envFile": "${workspaceFolder}\\.env",
+            "env": {
+                "FLASK_APP": "app:app",
+                "FLASK_DEBUG": "1"
+            },
+            "jinja": true,
+            "justMyCode": false
+        },
+        {
+            "name": "Open.Chat: Run all tests (debug)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "unittest",
+            "args": [
+                "discover",
+                "-s",
+                ".",
+                "-p",
+                "test_*.py"
+            ],
+            "cwd": "${workspaceFolder}",
+            "envFile": "${workspaceFolder}\\.env",
+            "env": {
+                "FLASK_DEBUG": "1"
+            },
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "Python: Debug current file",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "cwd": "${workspaceFolder}",
+            "envFile": "${workspaceFolder}\\.env",
+            "env": {
+                "FLASK_DEBUG": "1"
+            },
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "Open.Chat: Browser",
+            "request": "launch",
+            "type": "editor-browser",
+            "url": "http://localhost:5000",
+            "webRoot": "${workspaceFolder}"
+        }
+    ],
+    "compounds": [
+        {
+            "name": "Open.Chat: Debug website (server + browser)",
+            "configurations": [
+                "Open.Chat: Flask app (debug)",
+                "Open.Chat: Browser"
+            ],
+            "stopAll": true
+        }
+    ]
+}

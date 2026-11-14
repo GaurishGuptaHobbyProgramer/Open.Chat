@@ -84,7 +84,10 @@ class ChatDatabaseTest(unittest.TestCase):
     def test_auth_pages_exist(self):
         client = self.app.test_client()
         self.assertEqual(client.get("/auth").status_code, 200)
-        self.assertEqual(client.get("/settings").status_code, 200)
+        settings = client.get("/settings")
+        self.assertEqual(settings.status_code, 200)
+        self.assertIn(b"OpenChat | Settings", settings.data)
+        self.assertTrue(settings.data.strip())
 
     def test_secret_key_development_fallback_and_production_requirement(self):
         with patch.dict(os.environ, {"APP_ENV": "development"}, clear=False):
@@ -102,6 +105,19 @@ class ChatDatabaseTest(unittest.TestCase):
             os.environ["SECRET_KEY"] = "configured-test-secret"
             configured_app = create_app({"TESTING": True, "DATABASE": self.db_path})
             self.assertEqual(configured_app.secret_key, "configured-test-secret")
+
+    def test_debug_mode_follows_environment_and_is_disabled_in_production(self):
+        with patch.dict(os.environ, {"APP_ENV": "development", "FLASK_DEBUG": "1"}, clear=False):
+            debug_app = create_app({"TESTING": True, "DATABASE": self.db_path})
+            self.assertTrue(debug_app.debug)
+
+        with patch.dict(
+            os.environ,
+            {"APP_ENV": "production", "FLASK_DEBUG": "1", "SECRET_KEY": "configured-test-secret"},
+            clear=False,
+        ):
+            production_app = create_app({"TESTING": True, "DATABASE": self.db_path, "DEBUG": True})
+            self.assertFalse(production_app.debug)
 
     def test_chat_requires_login(self):
         client = self.app.test_client()
@@ -916,16 +932,19 @@ class DeveloperControlCenterTest(unittest.TestCase):
 
         self.assertEqual(self.client.get("/developer").status_code, 403)
         endpoints = [
-            "/api/developer/users",
-            f"/api/developer/users?user_id={self.developer['id']}",
-            "/api/developer/conversations",
-            f"/api/developer/conversations/{self.dm_id}/messages",
-            "/api/developer/events",
-            "/api/developer/system",
+            ("GET", "/api/developer/users"),
+            ("GET", f"/api/developer/users?user_id={self.developer['id']}"),
+            ("GET", f"/api/developer/users/{self.bob['id']}"),
+            ("POST", f"/api/developer/users/{self.bob['id']}/suspension"),
+            ("GET", "/api/developer/conversations"),
+            ("GET", f"/api/developer/conversations/{self.dm_id}/messages"),
+            ("GET", "/api/developer/events"),
+            ("GET", "/api/developer/system"),
         ]
-        for endpoint in endpoints:
-            with self.subTest(endpoint=endpoint):
-                self.assertEqual(self.client.get(endpoint).status_code, 403)
+        for method, endpoint in endpoints:
+            with self.subTest(method=method, endpoint=endpoint):
+                response = self.client.open(endpoint, method=method, json={"suspended": True} if method == "POST" else None)
+                self.assertEqual(response.status_code, 403)
 
     def test_configured_developer_can_inspect_operations_without_secrets(self):
         with self.client.session_transaction() as session:
@@ -938,11 +957,17 @@ class DeveloperControlCenterTest(unittest.TestCase):
         users = self.client.get("/api/developer/users")
         self.assertEqual(users.status_code, 200)
         user_records = users.get_json()
+        selected_user = self.client.get(f"/api/developer/users/{self.alice['id']}")
+        self.assertEqual(selected_user.status_code, 200)
+        self.assertEqual(selected_user.get_json()["id"], self.alice["id"])
+        self.assertNotIn("password_hash", str(selected_user.get_json()))
         self.assertTrue(any(user["id"] == self.alice["id"] for user in user_records))
         developer_record = next(user for user in user_records if user["id"] == self.developer["id"])
         alice_record = next(user for user in user_records if user["id"] == self.alice["id"])
         self.assertTrue(developer_record["is_developer"])
         self.assertFalse(alice_record["is_developer"])
+        self.assertEqual(alice_record["account_status"], "Active")
+        self.assertFalse(alice_record["is_suspended"])
         self.assertEqual(alice_record["online_status"], "Not Tracked")
         self.assertEqual(alice_record["last_activity"], "Not Tracked")
         self.assertNotIn("password_hash", str(user_records))
@@ -980,6 +1005,7 @@ class DeveloperControlCenterTest(unittest.TestCase):
         system = self.client.get("/api/developer/system")
         self.assertEqual(system.status_code, 200)
         self.assertEqual(system.get_json()["database_health"], "ok")
+        self.assertEqual(system.get_json()["debug_mode"], self.app.debug)
         self.assertEqual(system.get_json()["presence_account_mapping"], "not implemented")
         self.assertNotIn("SECRET_KEY", str(system.get_json()))
         self.assertNotIn("password_hash", str(system.get_json()))
@@ -989,6 +1015,108 @@ class DeveloperControlCenterTest(unittest.TestCase):
         events = self.client.get("/api/developer/events").get_json()
         self.assertTrue(any(item["event_type"] == "direct_conversation_opened" for item in events))
         self.assertTrue(any(item["event_type"] == "failed_request" for item in events))
+
+    def test_developer_can_suspend_and_reactivate_accounts(self):
+        with self.client.session_transaction() as session:
+            session["user_id"] = self.developer["id"]
+
+        alice_client = self.app.test_client()
+        with alice_client.session_transaction() as session:
+            session["user_id"] = self.alice["id"]
+
+        invalid_payload = self.client.post(
+            f"/api/developer/users/{self.alice['id']}/suspension",
+            json={"suspended": "yes"},
+        )
+        self.assertEqual(invalid_payload.status_code, 400)
+        self.assertEqual(
+            self.client.post("/api/developer/users/999999/suspension", json={"suspended": True}).status_code,
+            404,
+        )
+
+        suspended = self.client.post(
+            f"/api/developer/users/{self.alice['id']}/suspension",
+            json={"suspended": True},
+        )
+        self.assertEqual(suspended.status_code, 200)
+        self.assertTrue(suspended.get_json()["is_suspended"])
+
+        accounts = self.client.get("/api/developer/users").get_json()
+        alice_record = next(user for user in accounts if user["id"] == self.alice["id"])
+        self.assertEqual(alice_record["account_status"], "Suspended")
+        self.assertTrue(alice_record["is_suspended"])
+
+        self.assertEqual(alice_client.get("/").status_code, 302)
+        with alice_client.session_transaction() as session:
+            self.assertNotIn("user_id", session)
+
+        login = alice_client.post(
+            "/auth",
+            data={"mode": "login", "username": self.alice["username"], "password": "StrongPass123!"},
+        )
+        self.assertEqual(login.status_code, 200)
+        self.assertIn(b"Invalid username or password", login.data)
+
+        reactivated = self.client.post(
+            f"/api/developer/users/{self.alice['id']}/suspension",
+            json={"suspended": False},
+        )
+        self.assertEqual(reactivated.status_code, 200)
+        self.assertFalse(reactivated.get_json()["is_suspended"])
+        login = alice_client.post(
+            "/auth",
+            data={"mode": "login", "username": self.alice["username"], "password": "StrongPass123!"},
+        )
+        self.assertEqual(login.status_code, 302)
+        self.assertEqual(login.headers["Location"], "/")
+
+        events = self.client.get("/api/developer/events").get_json()
+        self.assertTrue(any(event["event_type"] == "account_suspended" for event in events))
+        self.assertTrue(any(event["event_type"] == "account_reactivated" for event in events))
+
+    def test_developer_accounts_cannot_be_suspended(self):
+        self.app.config["OPENCHAT_DEVELOPER_USER_ID"] = f"{self.developer['id']},{self.bob['id']}"
+        with self.client.session_transaction() as session:
+            session["user_id"] = self.developer["id"]
+        for user_id in (self.developer["id"], self.bob["id"]):
+            with self.subTest(user_id=user_id):
+                response = self.client.post(
+                    f"/api/developer/users/{user_id}/suspension",
+                    json={"suspended": True},
+                )
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.get_json()["error"], "Developer accounts cannot be suspended.")
+
+    def test_developer_login_opens_control_center_and_regular_login_opens_chat(self):
+        developer_client = self.app.test_client()
+        developer_response = developer_client.post(
+            "/auth",
+            data={
+                "mode": "login",
+                "username": self.developer["username"],
+                "password": "DeveloperPass123!",
+            },
+        )
+        self.assertEqual(developer_response.status_code, 302)
+        self.assertEqual(developer_response.headers["Location"], "/developer")
+        developer_page = developer_client.get(developer_response.headers["Location"])
+        self.assertEqual(developer_page.status_code, 200)
+        self.assertIn(b"Developer Control Center", developer_page.data)
+
+        regular_client = self.app.test_client()
+        regular_response = regular_client.post(
+            "/auth",
+            data={
+                "mode": "login",
+                "username": self.alice["username"],
+                "password": "StrongPass123!",
+            },
+        )
+        self.assertEqual(regular_response.status_code, 302)
+        self.assertEqual(regular_response.headers["Location"], "/")
+        home_page = regular_client.get(regular_response.headers["Location"])
+        self.assertEqual(home_page.status_code, 200)
+        self.assertIn(b"Open.Chat | Communication", home_page.data)
 
     def test_developer_id_mismatch_is_denied_and_events_are_bounded(self):
         with self.client.session_transaction() as session:
@@ -1006,6 +1134,19 @@ class DeveloperControlCenterTest(unittest.TestCase):
             details = " ".join(row[0] for row in db.execute("SELECT detail FROM application_events").fetchall())
             self.assertNotIn("session-cookie-value", details)
             self.assertNotIn("request-body-secret", details)
+
+    def test_multiple_configured_developers_have_control_center_access(self):
+        self.app.config["OPENCHAT_DEVELOPER_USER_ID"] = f"{self.developer['id']}, {self.bob['id']}"
+        with self.client.session_transaction() as session:
+            session["user_id"] = self.bob["id"]
+
+        self.assertEqual(self.client.get("/developer").status_code, 200)
+        users = self.client.get("/api/developer/users")
+        self.assertEqual(users.status_code, 200)
+        records = {user["id"]: user for user in users.get_json()}
+        self.assertTrue(records[self.developer["id"]]["is_developer"])
+        self.assertTrue(records[self.bob["id"]]["is_developer"])
+        self.assertFalse(records[self.alice["id"]]["is_developer"])
 
 
 if __name__ == "__main__":

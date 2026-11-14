@@ -14,10 +14,41 @@ function addEmptyRow(body, colspan, label) {
 
 async function getDeveloperData(path) {
     const response = await fetch(path, { cache: "no-store", headers: { Accept: "application/json" } });
+    const data = await response.json();
     if (!response.ok) {
-        throw new Error(`Request failed (${response.status})`);
+        throw new Error(data.error || `Request failed (${response.status})`);
     }
-    return response.json();
+    return data;
+}
+
+function createAccountActionButton(account) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `developer-action-button${account.is_suspended ? " is-suspended" : ""}`;
+    button.textContent = account.is_suspended ? "Reactivate" : "Suspend";
+    button.disabled = account.is_developer;
+    if (account.is_developer) {
+        button.title = "Developer accounts are protected from suspension.";
+    } else {
+        button.addEventListener("click", () => updateAccountSuspension(account, button));
+    }
+    return button;
+}
+
+async function lookupAccount(userId) {
+    const result = document.getElementById("account-id-result");
+    result.textContent = "Looking up account...";
+    result.classList.remove("is-error");
+    try {
+        const account = await getDeveloperData(`/api/developer/users/${userId}`);
+        const summary = document.createElement("span");
+        summary.className = "developer-id-result-summary";
+        summary.textContent = `#${account.id} ${account.username} · ${account.account_status}${account.is_developer ? " · developer account" : ""}`;
+        result.replaceChildren(summary, createAccountActionButton(account));
+    } catch (error) {
+        result.textContent = error.message || `Could not look up account #${userId}.`;
+        result.classList.add("is-error");
+    }
 }
 
 function renderAccounts(accounts) {
@@ -25,12 +56,12 @@ function renderAccounts(accounts) {
     body.replaceChildren();
     document.getElementById("account-count").textContent = `${accounts.length} shown`;
     if (!accounts.length) {
-        addEmptyRow(body, 8, "No accounts found.");
+        addEmptyRow(body, 9, "No accounts found.");
         return;
     }
     accounts.forEach((account) => {
         const row = document.createElement("tr");
-        addCell(row, account.id);
+        addCell(row, `#${account.id}`).classList.add("developer-id-cell");
         addCell(row, account.username);
         addCell(row, account.display_name);
         addCell(row, account.created_at);
@@ -38,8 +69,45 @@ function renderAccounts(accounts) {
         addCell(row, account.account_status);
         addCell(row, account.is_developer ? "Yes" : "No");
         addCell(row, `${account.online_status} / ${account.last_activity}`);
+        const actionCell = document.createElement("td");
+        actionCell.appendChild(createAccountActionButton(account));
+        row.appendChild(actionCell);
         body.appendChild(row);
     });
+}
+
+async function updateAccountSuspension(account, button) {
+    const suspended = !account.is_suspended;
+    const action = suspended ? "suspend" : "reactivate";
+    if (suspended && !window.confirm(`Suspend account #${account.id} (${account.username})? They will be signed out on their next request.`)) {
+        return;
+    }
+
+    const status = document.getElementById("account-action-status");
+    button.disabled = true;
+    status.textContent = `${action === "suspend" ? "Suspending" : "Reactivating"} account #${account.id}...`;
+    status.classList.remove("is-error");
+
+    try {
+        const response = await fetch(`/api/developer/users/${account.id}/suspension`, {
+            method: "POST",
+            cache: "no-store",
+            headers: { Accept: "application/json", "Content-Type": "application/json" },
+            body: JSON.stringify({ suspended }),
+        });
+        const result = await response.json();
+        if (!response.ok) {
+            throw new Error(result.error || `Request failed (${response.status})`);
+        }
+        status.textContent = `Account #${account.id} ${suspended ? "suspended" : "reactivated"}.`;
+        const accounts = await getDeveloperData("/api/developer/users");
+        renderAccounts(accounts);
+        await lookupAccount(account.id);
+    } catch (error) {
+        status.textContent = error.message || `Could not ${action} account #${account.id}.`;
+        status.classList.add("is-error");
+        button.disabled = false;
+    }
 }
 
 function renderConversations(conversations) {
@@ -141,5 +209,13 @@ async function loadDeveloperCenter() {
         document.getElementById("system-summary").textContent = error.message || "Could not load control center data.";
     }
 }
+
+document.getElementById("account-id-lookup").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const userId = Number.parseInt(document.getElementById("account-id-input").value, 10);
+    if (Number.isSafeInteger(userId) && userId > 0) {
+        lookupAccount(userId);
+    }
+});
 
 loadDeveloperCenter();

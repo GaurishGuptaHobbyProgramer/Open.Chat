@@ -14,6 +14,7 @@
             <span>Open.Chat <small>Developer Control Center</small></span>
         </a>
         <div class="developer-header-actions">
+            <span class="developer-env-badge">CONTROL PLANE / v1</span>
             <span>Signed in as {{ current_user.username }}</span>
             <a href="{{ url_for('home') }}">Open chat</a>
             <form method="post" action="{{ url_for('logout_page') }}"><button type="submit">Log out</button></form>
@@ -37,10 +38,17 @@
 
         <section class="developer-section" aria-labelledby="accounts-heading">
             <div class="developer-section-heading"><div><p class="eyebrow">People</p><h2 id="accounts-heading">Accounts</h2></div><span id="account-count" class="developer-state">Loading</span></div>
+            <p id="account-action-status" class="developer-action-status" role="status" aria-live="polite"></p>
+            <form id="account-id-lookup" class="developer-id-lookup">
+                <label for="account-id-input">Direct account lookup</label>
+                <input id="account-id-input" type="number" min="1" step="1" placeholder="Enter user ID" required>
+                <button type="submit">Lookup ID</button>
+            </form>
+            <div id="account-id-result" class="developer-id-result" aria-live="polite"></div>
             <div class="developer-table-wrap">
-                <table><thead><tr><th>ID</th><th>Username</th><th>Display name</th><th>Created</th><th>Profile status</th><th>Account state</th><th>Developer</th><th>Presence / activity</th></tr></thead><tbody id="accounts-rows"><tr><td colspan="8">Loading accounts...</td></tr></tbody></table>
+                <table><thead><tr><th>ID</th><th>Username</th><th>Display name</th><th>Created</th><th>Profile status</th><th>Account state</th><th>Developer</th><th>Presence / activity</th><th>Access</th></tr></thead><tbody id="accounts-rows"><tr><td colspan="9">Loading accounts...</td></tr></tbody></table>
             </div>
-            <p class="developer-note">Account suspension, per-account online status, and last activity are not tracked by the current application schema.</p>
+            <p class="developer-note">Suspension blocks sign-in and invalidates active sessions on their next request. Developer accounts are protected. Suspended accounts can be reactivated here.</p>
         </section>
 
         <section class="developer-section" aria-labelledby="conversations-heading">

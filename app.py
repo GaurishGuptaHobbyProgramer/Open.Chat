@@ -128,6 +128,13 @@ def init_db():
         db.execute(f"DROP INDEX IF EXISTS {index_row['name']}")
 
     db.execute("UPDATE users SET username = TRIM(username) WHERE username IS NOT NULL")
+    user_columns = {row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()}
+    if "is_suspended" not in user_columns:
+        db.execute("ALTER TABLE users ADD COLUMN is_suspended INTEGER NOT NULL DEFAULT 0")
+    if "suspended_at" not in user_columns:
+        db.execute("ALTER TABLE users ADD COLUMN suspended_at TEXT")
+    if "suspended_by" not in user_columns:
+        db.execute("ALTER TABLE users ADD COLUMN suspended_by INTEGER")
     db.commit()
 
 
@@ -176,11 +183,11 @@ def get_current_user():
 
     db = get_db()
     row = db.execute(
-        "SELECT id, username, created_at FROM users WHERE id = ?",
+        "SELECT id, username, created_at, is_suspended FROM users WHERE id = ?",
         (user_id,),
     ).fetchone()
 
-    if row is None:
+    if row is None or row["is_suspended"]:
         session.clear()
         return None
 
@@ -790,18 +797,42 @@ def record_application_event(event_type, detail, endpoint=None, response_status=
         current_app.logger.exception("Could not record application event")
 
 
-def get_configured_developer_user_id():
-    try:
-        developer_id = int(current_app.config.get("OPENCHAT_DEVELOPER_USER_ID"))
-    except (TypeError, ValueError):
-        return None
-    return developer_id if developer_id > 0 else None
+def get_configured_developer_user_ids():
+    configured_ids = current_app.config.get("OPENCHAT_DEVELOPER_USER_ID")
+    if isinstance(configured_ids, int):
+        configured_ids = str(configured_ids)
+    if not isinstance(configured_ids, str):
+        return set()
+
+    developer_ids = set()
+    for configured_id in configured_ids.split(","):
+        try:
+            developer_id = int(configured_id.strip())
+        except ValueError:
+            continue
+        if developer_id > 0:
+            developer_ids.add(developer_id)
+    return developer_ids
 
 
 def is_developer_user(user=None):
     active_user = user if user is not None else get_current_user()
-    developer_id = get_configured_developer_user_id()
-    return active_user is not None and developer_id is not None and active_user["id"] == developer_id
+    return active_user is not None and active_user["id"] in get_configured_developer_user_ids()
+
+
+def serialize_developer_user(row):
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "display_name": row["display_name"],
+        "created_at": row["created_at"],
+        "profile_status": row["profile_status"],
+        "account_status": "Suspended" if row["is_suspended"] else "Active",
+        "is_suspended": bool(row["is_suspended"]),
+        "last_activity": "Not Tracked",
+        "online_status": "Not Tracked",
+        "is_developer": row["id"] in get_configured_developer_user_ids(),
+    }
 
 
 def mark_conversation_read(conversation_id, user_id):
@@ -1352,11 +1383,11 @@ def authenticate_user(username, password):
     clean_username = (username or "").strip()
     db = get_db()
     user = db.execute(
-        "SELECT id, username, password_hash FROM users WHERE LOWER(username) = LOWER(?)",
+        "SELECT id, username, password_hash, is_suspended FROM users WHERE LOWER(username) = LOWER(?)",
         (clean_username,),
     ).fetchone()
 
-    if user is None:
+    if user is None or user["is_suspended"]:
         return False
 
     if not check_password_hash(user["password_hash"], password or ""):
@@ -1377,6 +1408,197 @@ def get_idle_ai_defaults():
         "personality": "warm, curious, and easygoing",
         "greeting": "Tell me what is on your mind, and we can keep the conversation flowing.",
     }
+
+
+def get_about_openchat_content():
+    return {
+        "version": "2.0",
+        "tagline": "Premium communication built for modern communities.",
+        "project_vision": "Open.Chat is designed to make digital communication feel intentional, personal, and premium while staying approachable and lightweight.",
+        "mission": "Bring elegant collaboration, thoughtful messaging, and community-first interaction to everyone without sacrificing speed or simplicity.",
+        "features": [
+            "Real-time personal messaging",
+            "Group conversations and community spaces",
+            "Status updates and profile visibility",
+            "Voice and video calling flows",
+            "Media and file sharing",
+            "Theme-aware premium desktop and mobile experience",
+            "Open.Chat AI and future-ready product ecosystem",
+        ],
+        "developer_info": "Built and maintained by the Open.Chat engineering team for continual refinement and community-driven product development.",
+        "copyright": "© 2025 Open.Chat. All rights reserved.",
+        "coming_soon": [
+            "Idle AI — Coming Soon",
+            "Open.Chat Mobile App — Coming Soon",
+            "Expanded privacy controls and trust features",
+            "Additional community utilities and productivity tools",
+        ],
+    }
+
+
+def get_ad_network_status():
+    return {
+        "house_ads_enabled": True,
+        "google_ads_enabled": False,
+        "future_sponsor_slots_enabled": False,
+        "ad_placements": [
+            {"name": "sidebar", "label": "Premium sidebar", "ad_width": "full", "recommended_network": "House"},
+            {"name": "chat-list", "label": "Chat list slot", "ad_width": "full", "recommended_network": "House"},
+            {"name": "home", "label": "Discovery panel", "ad_width": "wide", "recommended_network": "House"},
+            {"name": "settings", "label": "Settings update rail", "ad_width": "wide", "recommended_network": "House"},
+        ],
+        "ready_for_google": True,
+        "future_networks": ["Google Ads", "Sponsored partners", "Brand placements"],
+    }
+
+
+def get_ad_campaigns(placement=None, active_only=True):
+    campaigns = [
+        {
+            "id": "idle-ai-coming-soon",
+            "title": "Idle AI — Coming Soon",
+            "description": "Meet the next generation of intelligent assistance. Idle AI is coming soon to Open.Chat.",
+            "campaign_type": "HOUSE",
+            "advertiser_name": "Open.Chat",
+            "sponsored_status": False,
+            "image": "",
+            "cta_label": "Discover Idle AI",
+            "destination": "/idle-ai",
+            "placement": "sidebar",
+            "status": "active",
+            "start_date": "2025-01-01",
+            "end_date": "2099-12-31",
+            "display_priority": 10,
+            "campaign_budget": 0,
+            "campaign_duration": "ongoing",
+            "target_placement": "sidebar",
+            "impression_count": 0,
+            "click_count": 0,
+            "approval_status": "approved",
+            "ad_size": "compact",
+            "label": "Premium feature",
+            "network": "house",
+        },
+        {
+            "id": "mobile-app-coming-soon",
+            "title": "Open.Chat Mobile App — Coming Soon",
+            "description": "Your conversations, your community, your Open.Chat experience. A dedicated mobile application is coming soon.",
+            "campaign_type": "HOUSE",
+            "advertiser_name": "Open.Chat",
+            "sponsored_status": False,
+            "image": "",
+            "cta_label": "Coming Soon",
+            "destination": "/settings",
+            "placement": "chat-list",
+            "status": "active",
+            "start_date": "2025-01-01",
+            "end_date": "2099-12-31",
+            "display_priority": 9,
+            "campaign_budget": 0,
+            "campaign_duration": "ongoing",
+            "target_placement": "chat-list",
+            "impression_count": 0,
+            "click_count": 0,
+            "approval_status": "approved",
+            "ad_size": "compact",
+            "label": "App update",
+            "network": "house",
+        },
+        {
+            "id": "discover-features",
+            "title": "Discover What's New",
+            "description": "Explore the latest Open.Chat features and discover everything our platform has to offer.",
+            "campaign_type": "HOUSE",
+            "advertiser_name": "Open.Chat",
+            "sponsored_status": False,
+            "image": "",
+            "cta_label": "Explore Features",
+            "destination": "/settings#about-openchat",
+            "placement": "home",
+            "status": "active",
+            "start_date": "2025-01-01",
+            "end_date": "2099-12-31",
+            "display_priority": 8,
+            "campaign_budget": 0,
+            "campaign_duration": "ongoing",
+            "target_placement": "home",
+            "impression_count": 0,
+            "click_count": 0,
+            "approval_status": "approved",
+            "ad_size": "wide",
+            "label": "Product spotlight",
+            "network": "house",
+        },
+        {
+            "id": "know-about-us",
+            "title": "Know About Us",
+            "description": "Curious about Open.Chat? Learn about our vision, mission, development and the people behind the project.",
+            "campaign_type": "HOUSE",
+            "advertiser_name": "Open.Chat",
+            "sponsored_status": False,
+            "image": "",
+            "cta_label": "About Open.Chat",
+            "destination": "/settings#about-openchat",
+            "placement": "settings",
+            "status": "active",
+            "start_date": "2025-01-01",
+            "end_date": "2099-12-31",
+            "display_priority": 7,
+            "campaign_budget": 0,
+            "campaign_duration": "ongoing",
+            "target_placement": "settings",
+            "impression_count": 0,
+            "click_count": 0,
+            "approval_status": "approved",
+            "ad_size": "wide",
+            "label": "Brand story",
+            "network": "house",
+        },
+        {
+            "id": "google-ads-ready-slot",
+            "title": "Google Ads Ready",
+            "description": "Reserved ad real estate for future sponsored placements and premium partner campaigns.",
+            "campaign_type": "GOOGLE",
+            "advertiser_name": "Reserved",
+            "sponsored_status": False,
+            "image": "",
+            "cta_label": "Available for future network",
+            "destination": "/settings#about-openchat",
+            "placement": "sidebar",
+            "status": "draft",
+            "start_date": "2025-01-01",
+            "end_date": "2099-12-31",
+            "display_priority": 5,
+            "campaign_budget": 0,
+            "campaign_duration": "reserved",
+            "target_placement": "sidebar",
+            "impression_count": 0,
+            "click_count": 0,
+            "approval_status": "pending",
+            "ad_size": "compact",
+            "label": "Ad network ready",
+            "network": "google",
+        },
+    ]
+
+    if active_only:
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        campaigns = [
+            item for item in campaigns
+            if item.get("status") == "active"
+            and item.get("start_date", "2000-01-01") <= now
+            and item.get("end_date", "2099-12-31") >= now
+        ]
+
+    if placement is not None:
+        campaigns = [item for item in campaigns if item.get("placement") == placement]
+
+    campaigns.sort(key=lambda item: (-int(item.get("display_priority") or 0), item.get("title") or ""))
+    return campaigns
+
+
+def get_active_campaigns_for_page(placement, limit=2):
+    return get_ad_campaigns(placement=placement, active_only=True)[:max(1, int(limit))]
 
 
 def get_user_idle_settings(user_id):
@@ -1891,12 +2113,14 @@ def remove_presence(token):
 def create_app(test_config=None):
     app = Flask(__name__)
     app_environment = (os.getenv("APP_ENV") or os.getenv("FLASK_ENV") or "development").strip().lower()
+    debug_enabled = str(os.getenv("FLASK_DEBUG", "false")).strip().lower() in {"1", "true", "yes", "on"}
     configured_secret = os.getenv("SECRET_KEY")
     test_config_secret = test_config.get("SECRET_KEY") if isinstance(test_config, dict) else None
 
     app.config.from_mapping(
         SECRET_KEY=configured_secret or test_config_secret or "openchat-local-development-only",
         APP_ENV=app_environment,
+        DEBUG=debug_enabled and app_environment not in {"production", "prod"},
         DATABASE=os.getenv("DATABASE_URL", os.path.join(app.root_path, "chat.db")),
         UPLOAD_FOLDER=os.path.join(app.root_path, "static", "uploads"),
         OPENCHAT_DEVELOPER_USER_ID=os.getenv("OPENCHAT_DEVELOPER_USER_ID", ""),
@@ -1907,6 +2131,9 @@ def create_app(test_config=None):
 
     if test_config is not None:
         app.config.update(test_config)
+
+    if app.config.get("APP_ENV") in {"production", "prod"}:
+        app.config["DEBUG"] = False
 
     if app.config.get("APP_ENV") in {"production", "prod"} and not (configured_secret or test_config_secret):
         raise RuntimeError("SECRET_KEY must be configured in production.")
@@ -1953,6 +2180,11 @@ def create_app(test_config=None):
             ai_enabled=is_ai_enabled(),
             is_developer=is_developer_user(current_user),
             call_ice_servers=get_call_ice_servers(),
+            sidebar_promotions=get_active_campaigns_for_page("sidebar", limit=2),
+            chat_list_promotions=get_active_campaigns_for_page("chat-list", limit=1),
+            home_promotions=get_active_campaigns_for_page("home", limit=2),
+            about_openchat=get_about_openchat_content(),
+            ad_network_status=get_ad_network_status(),
         )
 
     @app.route("/developer", methods=["GET"])
@@ -1974,27 +2206,79 @@ def create_app(test_config=None):
             """
             SELECT u.id, u.username, u.created_at,
                    COALESCE(p.display_name, u.username) AS display_name,
-                   COALESCE(p.status, 'Available') AS profile_status
+                   COALESCE(p.status, 'Available') AS profile_status,
+                   u.is_suspended
             FROM users u
             LEFT JOIN user_profiles p ON p.user_id = u.id
             ORDER BY u.id DESC
             LIMIT 500
             """
         ).fetchall()
-        return jsonify([
-            {
-                "id": row["id"],
-                "username": row["username"],
-                "display_name": row["display_name"],
-                "created_at": row["created_at"],
-                "profile_status": row["profile_status"],
-                "account_status": "Not Tracked",
-                "last_activity": "Not Tracked",
-                "online_status": "Not Tracked",
-                "is_developer": row["id"] == get_configured_developer_user_id(),
-            }
-            for row in rows
-        ])
+        return jsonify([serialize_developer_user(row) for row in rows])
+
+    @app.route("/api/developer/users/<int:user_id>", methods=["GET"])
+    def api_developer_user(user_id):
+        _, denied = authorize_developer_api()
+        if denied:
+            return denied
+        row = get_db().execute(
+            """
+            SELECT u.id, u.username, u.created_at,
+                   COALESCE(p.display_name, u.username) AS display_name,
+                   COALESCE(p.status, 'Available') AS profile_status,
+                   u.is_suspended
+            FROM users u
+            LEFT JOIN user_profiles p ON p.user_id = u.id
+            WHERE u.id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+        if row is None:
+            return jsonify({"error": "Account not found."}), 404
+        return jsonify(serialize_developer_user(row))
+
+    @app.route("/api/developer/users/<int:user_id>/suspension", methods=["POST"])
+    def api_developer_user_suspension(user_id):
+        current_user, denied = authorize_developer_api()
+        if denied:
+            return denied
+
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or not isinstance(payload.get("suspended"), bool):
+            return jsonify({"error": "Request body must include a boolean 'suspended' value."}), 400
+
+        db = get_db()
+        target = db.execute(
+            "SELECT id, is_suspended FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if target is None:
+            return jsonify({"error": "Account not found."}), 404
+
+        suspended = payload["suspended"]
+        if suspended and user_id in get_configured_developer_user_ids():
+            return jsonify({"error": "Developer accounts cannot be suspended."}), 409
+
+        if bool(target["is_suspended"]) != suspended:
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            db.execute(
+                "UPDATE users SET is_suspended = ?, suspended_at = ?, suspended_by = ? WHERE id = ?",
+                (int(suspended), now if suspended else None, current_user["id"] if suspended else None, user_id),
+            )
+            db.commit()
+            action = "suspended" if suspended else "reactivated"
+            record_application_event(
+                "account_suspended" if suspended else "account_reactivated",
+                f"Account {user_id} {action} by developer",
+                endpoint=request.endpoint,
+                user_id=current_user["id"],
+            )
+
+        return jsonify({
+            "id": user_id,
+            "is_suspended": suspended,
+            "account_status": "Suspended" if suspended else "Active",
+        })
 
     @app.route("/api/developer/conversations", methods=["GET"])
     def api_developer_conversations():
@@ -2185,7 +2469,12 @@ def create_app(test_config=None):
                 if not username or not password:
                     form_error = "Please enter both username and password."
                 elif authenticate_user(username, password):
-                    return redirect(request.args.get("next") or url_for("home"))
+                    default_destination = (
+                        url_for("developer_control_center")
+                        if is_developer_user()
+                        else url_for("home")
+                    )
+                    return redirect(request.args.get("next") or default_destination)
                 else:
                     form_error = "Invalid username or password."
 
@@ -2308,6 +2597,9 @@ def create_app(test_config=None):
             profile=profile,
             saved_message=saved_message,
             ai_enabled=is_ai_enabled(),
+            about_openchat=get_about_openchat_content(),
+            settings_promotions=get_active_campaigns_for_page("settings", limit=2),
+            ad_network_status=get_ad_network_status(),
         )
 
     @app.route("/idle-ai", methods=["GET", "POST"])
@@ -2814,5 +3106,5 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    debug_mode = str(os.getenv("FLASK_DEBUG", "false")).strip().lower() in {"1", "true", "yes", "on"}
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=debug_mode)
+    debug_host = "127.0.0.1" if app.debug else "0.0.0.0"
+    app.run(host=debug_host, port=int(os.environ.get("PORT", 5000)), debug=app.debug)
