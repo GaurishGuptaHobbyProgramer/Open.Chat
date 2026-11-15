@@ -5,8 +5,10 @@ import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 from urllib import error as urllib_error
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib import request as urllib_request
 
+import click
 try:
     from dotenv import load_dotenv
 except ImportError:  # pragma: no cover - optional dependency
@@ -14,8 +16,16 @@ except ImportError:  # pragma: no cover - optional dependency
         return False
 
 from flask import Flask, g, current_app, has_app_context, jsonify, redirect, render_template, request, session, url_for
+from flask_migrate import Migrate
+from flask_sqlalchemy import SQLAlchemy
+import psycopg2
+from psycopg2.extras import DictCursor
+from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
+
+orm_db = SQLAlchemy()
+migrate = Migrate()
 
 _project_root = os.path.dirname(os.path.abspath(__file__))
 _env_path = os.path.join(_project_root, ".env")
@@ -28,10 +38,411 @@ if os.path.exists(_env_path):
 load_dotenv(_env_path)
 
 
+class PostgresCursor:
+    def __init__(self, cursor, lastrowid=None):
+        self._cursor = cursor
+        self.lastrowid = lastrowid
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+
+class PostgresConnection:
+    _tables_with_ids = {
+        "application_events",
+        "call_sessions",
+        "call_signals",
+        "conversation_members",
+        "conversation_messages",
+        "conversations",
+        "messages",
+        "presence",
+        "user_notifications",
+        "user_statuses",
+        "users",
+    }
+
+    def __init__(self, connection):
+        self._connection = connection
+
+    def execute(self, query, parameters=()):
+        statement = query.strip()
+        if statement.upper() == "BEGIN IMMEDIATE":
+            statement = "BEGIN"
+
+        ignored_insert = statement.upper().startswith("INSERT OR IGNORE INTO ")
+        if ignored_insert:
+            statement = re.sub(r"^INSERT OR IGNORE INTO", "INSERT INTO", statement, flags=re.IGNORECASE)
+
+        replacement_insert = re.match(
+            r"^INSERT OR REPLACE INTO presence\s*\(([^)]*)\)\s*(.*)$",
+            statement,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if replacement_insert:
+            statement = (
+                "INSERT INTO presence ("
+                + replacement_insert.group(1)
+                + ") "
+                + replacement_insert.group(2)
+                + " ON CONFLICT(token) DO UPDATE SET created_at = EXCLUDED.created_at"
+            )
+
+        insert_match = re.match(r"^INSERT INTO ([a-zA-Z_][a-zA-Z0-9_]*)\b", statement, flags=re.IGNORECASE)
+        returns_id = bool(
+            insert_match
+            and insert_match.group(1).lower() in self._tables_with_ids
+            and " RETURNING " not in statement.upper()
+        )
+        if ignored_insert:
+            statement += " ON CONFLICT DO NOTHING"
+        if returns_id:
+            statement += " RETURNING id"
+
+        statement = statement.replace("?", "%s")
+        cursor = self._connection.cursor(cursor_factory=DictCursor)
+        cursor.execute(statement, parameters or ())
+        lastrowid = None
+        if returns_id:
+            row = cursor.fetchone()
+            if row is not None:
+                lastrowid = row[0]
+        return PostgresCursor(cursor, lastrowid)
+
+    def commit(self):
+        self._connection.commit()
+
+    def rollback(self):
+        self._connection.rollback()
+
+    def close(self):
+        self._connection.close()
+
+
+def _is_postgres_url(value):
+    return isinstance(value, str) and value.lower().startswith(("postgres://", "postgresql://", "postgresql+psycopg2://"))
+
+
+def _normalize_postgres_url(value):
+    scheme, separator, remainder = value.partition("://")
+    if not separator:
+        raise ValueError("DATABASE_URL must be a PostgreSQL URL.")
+
+    normalized_scheme = "postgresql" if scheme.lower() in {"postgres", "postgresql+psycopg2"} else scheme
+    parts = urlsplit(normalized_scheme + "://" + remainder)
+    if parts.scheme != "postgresql":
+        raise ValueError("DATABASE_URL must use PostgreSQL.")
+
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    sslmode = next((item_value.lower() for key, item_value in query if key.lower() == "sslmode"), None)
+    if sslmode is None:
+        query.append(("sslmode", "require"))
+    elif sslmode not in {"require", "verify-ca", "verify-full"}:
+        raise ValueError("PostgreSQL connections must use TLS (sslmode=require or stronger).")
+
+    return urlunsplit(parts._replace(query=urlencode(query)))
+
+
+def _sqlite_path(value):
+    if value in {None, "", "chat.db"}:
+        return os.path.join(_project_root, "chat.db")
+    if value.startswith("sqlite:///"):
+        value = value[len("sqlite:///"):]
+    if not os.path.isabs(value):
+        value = os.path.join(_project_root, value)
+    return os.path.abspath(value)
+
+
+_SQLITE_IMPORT_TABLES = (
+    "users",
+    "messages",
+    "presence",
+    "user_settings",
+    "user_profiles",
+    "user_statuses",
+    "conversations",
+    "conversation_members",
+    "conversation_messages",
+    "conversation_read_state",
+    "conversation_typing",
+    "user_notifications",
+    "call_sessions",
+    "call_signals",
+    "application_events",
+    "enormous_space",
+)
+
+_SQLITE_IMPORT_ID_TABLES = {
+    "users",
+    "messages",
+    "presence",
+    "user_statuses",
+    "conversations",
+    "conversation_members",
+    "conversation_messages",
+    "user_notifications",
+    "call_sessions",
+    "call_signals",
+    "application_events",
+}
+
+_SQLITE_IMPORT_UNIQUE_KEYS = {
+    "users": (("id",),),
+    "messages": (("id",),),
+    "presence": (("id",), ("token",)),
+    "user_settings": (("user_id",),),
+    "user_profiles": (("user_id",),),
+    "user_statuses": (("id",),),
+    "conversations": (("id",),),
+    "conversation_members": (("id",), ("conversation_id", "user_id")),
+    "conversation_messages": (("id",),),
+    "conversation_read_state": (("conversation_id", "user_id"),),
+    "conversation_typing": (("conversation_id", "user_id"),),
+    "user_notifications": (("id",),),
+    "call_sessions": (("id",),),
+    "call_signals": (("id",),),
+    "application_events": (("id",),),
+    "enormous_space": (("id",), ("slug",)),
+}
+
+
+def _count_source_duplicate_keys(source, table_name, key_columns):
+    columns = ", ".join(f'"{column}"' for column in key_columns)
+    row = source.execute(
+        f'SELECT COUNT(*) FROM (SELECT {columns} FROM "{table_name}" '
+        f'GROUP BY {columns} HAVING COUNT(*) > 1)'
+    ).fetchone()
+    return row[0]
+
+
+def _count_target_key_collisions(source, target_cursor, table_name, key_columns):
+    columns = ", ".join(f'"{column}"' for column in key_columns)
+    aliases = ", ".join(f'"{column}"' for column in key_columns)
+    join_clause = " AND ".join(f'target."{column}" = incoming."{column}"' for column in key_columns)
+    source_cursor = source.execute(f'SELECT {columns} FROM "{table_name}"')
+    collisions = 0
+    while True:
+        batch = source_cursor.fetchmany(500)
+        if not batch:
+            break
+        values = ", ".join(
+            "(" + ", ".join(["%s"] * len(key_columns)) + ")" for _ in batch
+        )
+        parameters = tuple(value for row in batch for value in row)
+        target_cursor.execute(
+            f'SELECT COUNT(*) FROM "{table_name}" AS target '
+            f'JOIN (VALUES {values}) AS incoming ({aliases}) ON {join_clause}',
+            parameters,
+        )
+        collisions += target_cursor.fetchone()[0]
+    return collisions
+
+
+def _import_sqlite_data(source_path, target_connection, dry_run=False):
+    source_uri = "file:" + os.path.abspath(source_path).replace("\\", "/") + "?mode=ro"
+    source = sqlite3.connect(source_uri, uri=True)
+    target_cursor = None
+    report = {
+        "dry_run": dry_run,
+        "safe_to_import": False,
+        "imported": False,
+        "tables": {},
+        "unsupported_target_data": [],
+    }
+    try:
+        target_cursor = target_connection.cursor()
+        source_tables = {
+            row[0]
+            for row in source.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        }
+        source_tables.discard("alembic_version")
+        if "users" not in source_tables:
+            raise ValueError("Source database does not contain the required users table.")
+        unsupported_tables = source_tables.difference(_SQLITE_IMPORT_TABLES)
+        if unsupported_tables:
+            raise ValueError(
+                "Source database contains tables not covered by the importer: "
+                + ", ".join(sorted(unsupported_tables))
+            )
+
+        target_cursor.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'"
+        )
+        target_tables = {row[0] for row in target_cursor.fetchall()}
+        missing_tables = set(_SQLITE_IMPORT_TABLES).difference(target_tables)
+        if missing_tables:
+            raise ValueError("Run `flask db upgrade` before importing; the PostgreSQL schema is incomplete.")
+        unsupported_target_tables = target_tables.difference(_SQLITE_IMPORT_TABLES).difference({"alembic_version"})
+        if unsupported_target_tables:
+            raise ValueError(
+                "PostgreSQL contains tables not covered by the importer: "
+                + ", ".join(sorted(unsupported_target_tables))
+            )
+
+        for table_name in _SQLITE_IMPORT_TABLES:
+            if table_name not in source_tables:
+                target_cursor.execute(f'SELECT COUNT(*) FROM "{table_name}"')
+                target_row_count = target_cursor.fetchone()[0]
+                report["tables"][table_name] = {
+                    "source_rows": 0,
+                    "target_rows": target_row_count,
+                    "duplicate_source_keys": {},
+                    "target_key_collisions": {},
+                    "verified_rows": 0,
+                }
+                if target_row_count:
+                    report["unsupported_target_data"].append(table_name)
+                continue
+
+            source_columns = [
+                row[1] for row in source.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+            ]
+            target_cursor.execute(
+                "SELECT column_name, is_nullable, column_default, is_identity "
+                "FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = %s "
+                "ORDER BY ordinal_position",
+                (table_name,),
+            )
+            target_column_details = target_cursor.fetchall()
+            target_columns = [row[0] for row in target_column_details]
+            extra_source_columns = set(source_columns).difference(target_columns)
+            if extra_source_columns:
+                raise ValueError(
+                    f"Source table {table_name!r} has unsupported columns: "
+                    + ", ".join(sorted(extra_source_columns))
+                )
+            missing_required = [
+                row[0]
+                for row in target_column_details
+                if row[0] not in source_columns
+                and row[1] == "NO"
+                and row[2] is None
+                and row[3] != "YES"
+            ]
+            if missing_required:
+                raise ValueError(
+                    f"Source table {table_name!r} is missing required columns: "
+                    + ", ".join(missing_required)
+                )
+
+            source_row_count = source.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+            target_cursor.execute(f'SELECT COUNT(*) FROM "{table_name}"')
+            target_row_count = target_cursor.fetchone()[0]
+            duplicate_source_keys = {}
+            target_key_collisions = {}
+            for key_columns in _SQLITE_IMPORT_UNIQUE_KEYS[table_name]:
+                missing_key_columns = set(key_columns).difference(source_columns)
+                if missing_key_columns:
+                    raise ValueError(
+                        f"Source table {table_name!r} is missing key columns: "
+                        + ", ".join(sorted(missing_key_columns))
+                    )
+                key_name = ",".join(key_columns)
+                duplicates = _count_source_duplicate_keys(source, table_name, key_columns)
+                collisions = _count_target_key_collisions(source, target_cursor, table_name, key_columns)
+                if duplicates:
+                    duplicate_source_keys[key_name] = duplicates
+                if collisions:
+                    target_key_collisions[key_name] = collisions
+
+            report["tables"][table_name] = {
+                "source_rows": source_row_count,
+                "target_rows": target_row_count,
+                "duplicate_source_keys": duplicate_source_keys,
+                "target_key_collisions": target_key_collisions,
+                "verified_rows": 0,
+            }
+            if target_row_count:
+                report["unsupported_target_data"].append(table_name)
+
+        report["safe_to_import"] = not report["unsupported_target_data"] and all(
+            not details["duplicate_source_keys"] and not details["target_key_collisions"]
+            for details in report["tables"].values()
+        )
+        if dry_run or not report["safe_to_import"]:
+            target_connection.rollback()
+            return report
+
+        for table_name in _SQLITE_IMPORT_TABLES:
+            if table_name not in source_tables:
+                continue
+            source_columns = [
+                row[1] for row in source.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+            ]
+            target_cursor.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = %s "
+                "ORDER BY ordinal_position",
+                (table_name,),
+            )
+            target_columns = [row[0] for row in target_cursor.fetchall()]
+            columns = [column for column in target_columns if column in source_columns]
+            quoted_columns = ", ".join(f'"{column}"' for column in columns)
+            placeholders = ", ".join(["%s"] * len(columns))
+            insert_sql = f'INSERT INTO "{table_name}" ({quoted_columns}) VALUES ({placeholders})'
+            source_cursor = source.execute(f'SELECT * FROM "{table_name}"')
+            inserted_rows = 0
+            while True:
+                batch = source_cursor.fetchmany(500)
+                if not batch:
+                    break
+                target_cursor.executemany(
+                    insert_sql,
+                    [tuple(row[column] for column in columns) for row in batch],
+                )
+                inserted_rows += len(batch)
+            target_cursor.execute(f'SELECT COUNT(*) FROM "{table_name}"')
+            verified_rows = target_cursor.fetchone()[0]
+            if inserted_rows != report["tables"][table_name]["source_rows"] or verified_rows != inserted_rows:
+                raise RuntimeError(f"Row-count verification failed for table {table_name!r}.")
+            report["tables"][table_name]["verified_rows"] = verified_rows
+
+        for table_name in _SQLITE_IMPORT_ID_TABLES:
+            target_cursor.execute(
+                f"SELECT setval(pg_get_serial_sequence(%s, 'id'), "
+                f"COALESCE(MAX(id), 1), MAX(id) IS NOT NULL) FROM \"{table_name}\"",
+                (table_name,),
+            )
+
+        target_connection.commit()
+        report["imported"] = True
+        return report
+    except Exception:
+        target_connection.rollback()
+        raise
+    finally:
+        if target_cursor is not None:
+            target_cursor.close()
+        source.close()
+
+
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(current_app.config["DATABASE"])
-        g.db.row_factory = sqlite3.Row
+        if current_app.config["DATABASE_BACKEND"] == "postgresql":
+            try:
+                connection = orm_db.engine.raw_connection()
+            except (psycopg2.Error, SQLAlchemyError) as exc:
+                current_app.logger.exception("Could not connect to the configured PostgreSQL database")
+                raise RuntimeError("The configured PostgreSQL database is unavailable.") from exc
+            g.db = PostgresConnection(connection)
+        else:
+            try:
+                g.db = sqlite3.connect(current_app.config["DATABASE"], timeout=10)
+                g.db.row_factory = sqlite3.Row
+            except sqlite3.Error as exc:
+                current_app.logger.exception("Could not connect to the configured SQLite database")
+                raise RuntimeError("The configured SQLite database is unavailable.") from exc
     return g.db
 
 
@@ -141,6 +552,11 @@ def init_db():
 def close_db(error):
     db = g.pop("db", None)
     if db is not None:
+        if error is not None:
+            try:
+                db.rollback()
+            except (sqlite3.Error, psycopg2.Error):
+                current_app.logger.exception("Could not roll back the database transaction")
         db.close()
 
 
@@ -791,7 +1207,7 @@ def record_application_event(event_type, detail, endpoint=None, response_status=
             "DELETE FROM application_events WHERE id NOT IN (SELECT id FROM application_events ORDER BY id DESC LIMIT 1000)"
         )
         db.commit()
-    except sqlite3.Error:
+    except (sqlite3.Error, psycopg2.Error):
         if "db" in g:
             g.db.rollback()
         current_app.logger.exception("Could not record application event")
@@ -1830,48 +2246,49 @@ def ensure_enormous_member(user_id, db=None):
 
 def ensure_enormous_space(db=None):
     active_db = db or get_db()
-    active_db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS conversations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            kind TEXT NOT NULL DEFAULT 'direct',
-            title TEXT,
-            created_by INTEGER,
-            created_at TEXT NOT NULL,
-            last_message_at TEXT,
-            is_archived INTEGER NOT NULL DEFAULT 0,
-            is_muted INTEGER NOT NULL DEFAULT 0,
-            is_pinned INTEGER NOT NULL DEFAULT 0,
-            FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE SET NULL
+    if current_app.config["DATABASE_BACKEND"] == "sqlite":
+        active_db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL DEFAULT 'direct',
+                title TEXT,
+                created_by INTEGER,
+                created_at TEXT NOT NULL,
+                last_message_at TEXT,
+                is_archived INTEGER NOT NULL DEFAULT 0,
+                is_muted INTEGER NOT NULL DEFAULT 0,
+                is_pinned INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE SET NULL
+            )
+            """
         )
-        """
-    )
-    active_db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS conversation_members (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            conversation_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            role TEXT NOT NULL DEFAULT 'member',
-            joined_at TEXT NOT NULL,
-            UNIQUE(conversation_id, user_id),
-            FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
-            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        active_db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                role TEXT NOT NULL DEFAULT 'member',
+                joined_at TEXT NOT NULL,
+                UNIQUE(conversation_id, user_id),
+                FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
         )
-        """
-    )
-    active_db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS enormous_space (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            name TEXT NOT NULL,
-            slug TEXT NOT NULL UNIQUE,
-            is_official INTEGER NOT NULL DEFAULT 1,
-            is_pinned INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL
+        active_db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS enormous_space (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                name TEXT NOT NULL,
+                slug TEXT NOT NULL UNIQUE,
+                is_official INTEGER NOT NULL DEFAULT 1,
+                is_pinned INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            )
+            """
         )
-        """
-    )
     row = active_db.execute(
         "SELECT id, name, slug, is_official, is_pinned, created_at FROM enormous_space WHERE id = 1"
     ).fetchone()
@@ -2116,21 +2533,61 @@ def create_app(test_config=None):
     debug_enabled = str(os.getenv("FLASK_DEBUG", "false")).strip().lower() in {"1", "true", "yes", "on"}
     configured_secret = os.getenv("SECRET_KEY")
     test_config_secret = test_config.get("SECRET_KEY") if isinstance(test_config, dict) else None
+    configured_database_url = os.getenv("DATABASE_URL") or os.path.join(app.root_path, "chat.db")
+    if isinstance(test_config, dict):
+        configured_database_url = test_config.get(
+            "DATABASE_URL",
+            test_config.get("DATABASE", configured_database_url),
+        )
 
     app.config.from_mapping(
         SECRET_KEY=configured_secret or test_config_secret or "openchat-local-development-only",
         APP_ENV=app_environment,
         DEBUG=debug_enabled and app_environment not in {"production", "prod"},
-        DATABASE=os.getenv("DATABASE_URL", os.path.join(app.root_path, "chat.db")),
+        DATABASE_URL=configured_database_url,
+        DATABASE=configured_database_url,
         UPLOAD_FOLDER=os.path.join(app.root_path, "static", "uploads"),
         OPENCHAT_DEVELOPER_USER_ID=os.getenv("OPENCHAT_DEVELOPER_USER_ID", ""),
         OPENCHAT_AI_ENABLED=str(os.getenv("OPENCHAT_AI_ENABLED", "false")).strip().lower() not in {"0", "false", "no", "off", ""},
     )
 
-    os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
-
     if test_config is not None:
         app.config.update(test_config)
+
+    database_url = app.config.get("DATABASE_URL", app.config.get("DATABASE"))
+    if isinstance(test_config, dict) and "DATABASE" in test_config and "DATABASE_URL" not in test_config:
+        database_url = test_config["DATABASE"]
+    app.config["DATABASE_URL"] = database_url
+    if _is_postgres_url(database_url):
+        normalized_database_url = _normalize_postgres_url(database_url)
+        app.config["DATABASE_BACKEND"] = "postgresql"
+        app.config["DATABASE"] = normalized_database_url
+        app.config["SQLALCHEMY_DATABASE_URI"] = normalized_database_url
+    else:
+        sqlite_path = _sqlite_path(database_url)
+        app.config["DATABASE_BACKEND"] = "sqlite"
+        app.config["DATABASE"] = sqlite_path
+        app.config["DATABASE_URL"] = sqlite_path
+        app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///" + sqlite_path.replace("\\", "/")
+
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    if app.config["DATABASE_BACKEND"] == "postgresql":
+        app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+            "pool_pre_ping": True,
+            "pool_recycle": 300,
+            "pool_size": 5,
+            "max_overflow": 5,
+            "pool_timeout": 10,
+            "connect_args": {"connect_timeout": 5},
+        }
+
+    if app.config.get("APP_ENV") in {"production", "prod"} and not app.config.get("TESTING"):
+        if app.config["DATABASE_BACKEND"] != "postgresql":
+            raise RuntimeError("DATABASE_URL must be a PostgreSQL connection URL in production.")
+
+    os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+    orm_db.init_app(app)
+    migrate.init_app(app, orm_db)
 
     if app.config.get("APP_ENV") in {"production", "prod"}:
         app.config["DEBUG"] = False
@@ -2400,12 +2857,30 @@ def create_app(test_config=None):
         if denied:
             return denied
         db = get_db()
-        table_names = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").fetchall()]
+        if current_app.config["DATABASE_BACKEND"] == "postgresql":
+            table_names = [
+                row[0]
+                for row in db.execute(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'"
+                ).fetchall()
+            ]
+        else:
+            table_names = [
+                row[0]
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                ).fetchall()
+            ]
         counts = {}
         for table_name in table_names:
             if re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", table_name):
                 counts[table_name] = db.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
-        integrity = db.execute("PRAGMA quick_check").fetchone()[0]
+        integrity = (
+            "ok"
+            if current_app.config["DATABASE_BACKEND"] == "postgresql"
+            else db.execute("PRAGMA quick_check").fetchone()[0]
+        )
         return jsonify({
             "database_health": "ok" if integrity == "ok" else "needs attention",
             "table_counts": counts,
@@ -2457,7 +2932,7 @@ def create_app(test_config=None):
                         return redirect(url_for("home"))
                     except ValueError as exc:
                         form_error = str(exc)
-                    except sqlite3.IntegrityError as exc:
+                    except (sqlite3.IntegrityError, psycopg2.IntegrityError) as exc:
                         current_app.logger.exception("Signup DB integrity failure for username=%s", username)
                         form_error = "This username is already taken."
                     except Exception as exc:
@@ -3090,14 +3565,22 @@ def create_app(test_config=None):
         return jsonify({"count": remove_presence(data.get("token"))})
 
     with app.app_context():
-        init_db()
-        ensure_profile_tables()
-        ensure_conversation_message_tables()
-        ensure_enormous_space()
-        ensure_call_tables()
-        ensure_notification_tables()
-        ensure_application_event_table()
-        migrate_legacy_messages()
+        if app.config["DATABASE_BACKEND"] == "sqlite" and app.config.get("TESTING"):
+            init_db()
+            ensure_profile_tables()
+            ensure_conversation_message_tables()
+            ensure_enormous_space()
+            ensure_call_tables()
+            ensure_notification_tables()
+            ensure_application_event_table()
+            migrate_legacy_messages()
+        elif app.config["DATABASE_BACKEND"] == "postgresql":
+            try:
+                get_db().execute("SELECT 1").fetchone()
+            except (RuntimeError, psycopg2.Error) as exc:
+                app.logger.exception("PostgreSQL connection check failed")
+                raise RuntimeError("Could not verify PostgreSQL connectivity during application startup.") from exc
+
         if app.config.get("APP_ENV") in {"production", "prod"}:
             developer_ids = get_configured_developer_user_ids()
             if not developer_ids:
@@ -3106,21 +3589,60 @@ def create_app(test_config=None):
                     "developer control-center access is unavailable."
                 )
             else:
-                placeholders = ",".join("?" for _ in developer_ids)
-                existing_ids = {
-                    row["id"]
-                    for row in get_db().execute(
-                        f"SELECT id FROM users WHERE id IN ({placeholders})",
-                        tuple(sorted(developer_ids)),
-                    ).fetchall()
-                }
-                missing_ids = sorted(developer_ids - existing_ids)
-                if missing_ids:
-                    app.logger.warning(
-                        "Configured developer account IDs are not present in the deployment database: %s. "
-                        "Create those accounts on the deployed site and configure their deployed user IDs.",
-                        missing_ids,
-                    )
+                schema_ready = True
+                if app.config["DATABASE_BACKEND"] == "postgresql":
+                    schema_ready = get_db().execute("SELECT to_regclass('public.users')").fetchone()[0] is not None
+                if schema_ready:
+                    placeholders = ",".join("?" for _ in developer_ids)
+                    existing_ids = {
+                        row["id"]
+                        for row in get_db().execute(
+                            f"SELECT id FROM users WHERE id IN ({placeholders})",
+                            tuple(sorted(developer_ids)),
+                        ).fetchall()
+                    }
+                    missing_ids = sorted(developer_ids - existing_ids)
+                    if missing_ids:
+                        app.logger.warning(
+                            "Configured developer account IDs are not present in the deployment database: %s. "
+                            "Create those accounts on the deployed site and configure their deployed user IDs.",
+                            missing_ids,
+                        )
+
+    @app.cli.command("import-sqlite")
+    @click.argument("source_path", type=click.Path(exists=True, dir_okay=False, readable=True))
+    @click.option("--dry-run", is_flag=True, help="Report counts and collisions without importing rows.")
+    def import_sqlite_command(source_path, dry_run):
+        if app.config["DATABASE_BACKEND"] != "postgresql":
+            raise click.ClickException("The import target must be PostgreSQL; set DATABASE_URL to its connection URL.")
+        try:
+            report = _import_sqlite_data(source_path, get_db()._connection, dry_run=dry_run)
+        except (ValueError, sqlite3.Error) as exc:
+            raise click.ClickException(str(exc)) from exc
+        except psycopg2.Error as exc:
+            app.logger.exception("SQLite-to-PostgreSQL import failed; the target transaction was rolled back")
+            raise click.ClickException(
+                "The import failed and the target transaction was rolled back. Check application logs."
+            ) from exc
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+        click.echo("SQLite import dry-run report:" if dry_run else "SQLite import report:")
+        click.echo("table | source rows | target rows | duplicate source keys | target key collisions | verified rows")
+        for table_name, details in report["tables"].items():
+            click.echo(
+                f"{table_name} | {details['source_rows']} | {details['target_rows']} | "
+                f"{details['duplicate_source_keys'] or 0} | "
+                f"{details['target_key_collisions'] or 0} | {details['verified_rows']}"
+            )
+        if report["unsupported_target_data"]:
+            click.echo("Non-empty target tables: " + ", ".join(report["unsupported_target_data"]))
+        if not report["safe_to_import"]:
+            raise click.ClickException("Import stopped: resolve target data or key collisions; no rows were written.")
+        if dry_run:
+            click.echo("Dry run passed. No data was written.")
+        else:
+            click.echo("Import completed and all source/target row counts were verified.")
 
     return app
 

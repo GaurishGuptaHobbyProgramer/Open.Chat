@@ -37,6 +37,9 @@ from app import (
     ensure_enormous_member,
     ensure_enormous_space,
     migrate_legacy_messages,
+    PostgresConnection,
+    _normalize_postgres_url,
+    _import_sqlite_data,
     update_user_profile,
 )
 
@@ -50,6 +53,114 @@ class ChatDatabaseTest(unittest.TestCase):
     def tearDown(self):
         if os.path.exists(self.db_path):
             os.remove(self.db_path)
+
+    def test_non_test_local_app_startup_does_not_modify_existing_database(self):
+        connection = sqlite3.connect(self.db_path)
+        connection.execute("CREATE TABLE preserved_data (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO preserved_data VALUES ('keep')")
+        connection.commit()
+        connection.close()
+
+        with patch.dict(os.environ, {"APP_ENV": "development"}, clear=False):
+            create_app({"DATABASE": self.db_path})
+
+        connection = sqlite3.connect(self.db_path)
+        self.assertEqual(connection.execute("SELECT value FROM preserved_data").fetchone()[0], "keep")
+        connection.close()
+
+    def test_production_requires_postgresql_database(self):
+        with patch.dict(os.environ, {"APP_ENV": "development", "SECRET_KEY": "test-secret"}, clear=False):
+            with self.assertRaisesRegex(RuntimeError, "DATABASE_URL must be a PostgreSQL"):
+                create_app({
+                    "APP_ENV": "production",
+                    "SECRET_KEY": "test-secret",
+                    "DATABASE": self.db_path,
+                })
+
+    def test_sqlite_import_rejects_source_without_users_table(self):
+        source_fd, source_path = tempfile.mkstemp()
+        os.close(source_fd)
+
+        class FakeCursor:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        class FakeConnection:
+            def __init__(self):
+                self.test_cursor = FakeCursor()
+                self.rolled_back = False
+
+            def cursor(self):
+                return self.test_cursor
+
+            def rollback(self):
+                self.rolled_back = True
+
+        target = FakeConnection()
+        try:
+            with self.assertRaisesRegex(ValueError, "required users table"):
+                _import_sqlite_data(source_path, target, dry_run=True)
+            self.assertTrue(target.rolled_back)
+            self.assertTrue(target.test_cursor.closed)
+        finally:
+            os.remove(source_path)
+
+    def test_postgresql_urls_require_tls_and_normalize_render_and_neon_schemes(self):
+        pooled_url = _normalize_postgres_url("postgres://user:pass@neon-pooler.example/db")
+        self.assertTrue(pooled_url.startswith("postgresql://"))
+        self.assertIn("sslmode=require", pooled_url)
+        direct_url = _normalize_postgres_url(
+            "postgresql://user:pass@neon.example/db?sslmode=verify-full"
+        )
+        self.assertIn("sslmode=verify-full", direct_url)
+        with self.assertRaisesRegex(ValueError, "must use TLS"):
+            _normalize_postgres_url("postgresql://user:pass@neon.example/db?sslmode=disable")
+
+    def test_postgresql_sqlite_compatibility_rewrites_insert_operations(self):
+        class FakeCursor:
+            rowcount = 1
+
+            def __init__(self):
+                self.statement = None
+                self.parameters = None
+
+            def execute(self, statement, parameters):
+                self.statement = statement
+                self.parameters = parameters
+
+            def fetchone(self):
+                return (42,)
+
+        class FakeConnection:
+            def __init__(self):
+                self.last_cursor = None
+
+            def cursor(self, cursor_factory=None):
+                self.last_cursor = FakeCursor()
+                return self.last_cursor
+
+        connection = FakeConnection()
+        database = PostgresConnection(connection)
+        result = database.execute(
+            "INSERT OR IGNORE INTO conversation_members "
+            "(conversation_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)",
+            (1, 7, "2026-01-01T00:00:00Z"),
+        )
+        self.assertIn("ON CONFLICT DO NOTHING RETURNING id", connection.last_cursor.statement)
+        self.assertIn("%s", connection.last_cursor.statement)
+        self.assertEqual(connection.last_cursor.parameters, (1, 7, "2026-01-01T00:00:00Z"))
+        self.assertEqual(result.lastrowid, 42)
+
+        database.execute(
+            "INSERT OR REPLACE INTO presence (token, created_at) VALUES (?, ?)",
+            ("token", "2026-01-01T00:00:00Z"),
+        )
+        self.assertIn(
+            "ON CONFLICT(token) DO UPDATE SET created_at = EXCLUDED.created_at RETURNING id",
+            connection.last_cursor.statement,
+        )
 
     def test_save_and_get_messages(self):
         with self.app.app_context():
@@ -80,6 +191,31 @@ class ChatDatabaseTest(unittest.TestCase):
             self.assertEqual(user["username"], "1, Alice")
             self.assertTrue(authenticate_user("1, Alice", "StrongPass123!"))
             self.assertFalse(authenticate_user("1, Alice", "wrong-password"))
+
+    def test_auth_routes_register_login_and_logout(self):
+        client = self.app.test_client()
+        signup = client.post(
+            "/auth",
+            data={
+                "mode": "signup",
+                "username": "Alice",
+                "password": "StrongPass123!",
+                "confirm_password": "StrongPass123!",
+            },
+        )
+        self.assertEqual(signup.status_code, 302)
+        self.assertEqual(client.get("/messages").status_code, 200)
+
+        logout = client.post("/logout")
+        self.assertEqual(logout.status_code, 302)
+        self.assertEqual(client.get("/messages").status_code, 302)
+
+        login = client.post(
+            "/auth",
+            data={"mode": "login", "username": "1, Alice", "password": "StrongPass123!"},
+        )
+        self.assertEqual(login.status_code, 302)
+        self.assertEqual(client.get("/messages").status_code, 200)
 
     def test_auth_pages_exist(self):
         client = self.app.test_client()
