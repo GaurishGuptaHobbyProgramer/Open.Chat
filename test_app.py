@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from flask import g
+
 from app import (
     add_group_member,
     authenticate_user,
@@ -45,6 +47,12 @@ from app import (
     _normalize_postgres_url,
     _import_sqlite_data,
     _create_sqlite_backup,
+    _schema_validation_errors,
+    _SQLITE_IMPORT_TABLES,
+    _REQUIRED_SCHEMA_COLUMNS,
+    _REQUIRED_SCHEMA_INDEXES,
+    _REQUIRED_SCHEMA_KEY_CONSTRAINTS,
+    _REQUIRED_SCHEMA_FOREIGN_KEYS,
     update_user_profile,
 )
 
@@ -86,6 +94,74 @@ class ChatDatabaseTest(unittest.TestCase):
         result = self.app.test_cli_runner().invoke(args=["verify-schema"])
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("requires a PostgreSQL DATABASE_URL", result.output)
+
+    def test_schema_verification_rejects_missing_objects_and_stale_migration_history(self):
+        complete_args = (
+            set(_SQLITE_IMPORT_TABLES),
+            _REQUIRED_SCHEMA_COLUMNS,
+            _REQUIRED_SCHEMA_INDEXES,
+            _REQUIRED_SCHEMA_KEY_CONSTRAINTS,
+            _REQUIRED_SCHEMA_FOREIGN_KEYS,
+            {"20261115_01"},
+            {"20261115_01"},
+        )
+        self.assertEqual(_schema_validation_errors(*complete_args), [])
+
+        incomplete_args = list(complete_args)
+        incomplete_args[0] = set(_SQLITE_IMPORT_TABLES).difference({"users"})
+        incomplete_args[2] = _REQUIRED_SCHEMA_INDEXES.difference({"idx_call_signals_recipient"})
+        incomplete_args[5] = {"stale_revision"}
+        errors = "; ".join(_schema_validation_errors(*incomplete_args))
+
+        self.assertIn("missing tables: users", errors)
+        self.assertIn("missing indexes: idx_call_signals_recipient", errors)
+        self.assertIn("Alembic revision mismatch", errors)
+
+    def test_failed_server_error_rolls_back_without_retrying_database_audit(self):
+        class FailedDatabase:
+            def __init__(self):
+                self.rollback_count = 0
+
+            def rollback(self):
+                self.rollback_count += 1
+
+            def close(self):
+                pass
+
+        database = FailedDatabase()
+        after_request = self.app.after_request_funcs[None][0]
+        with self.app.test_request_context("/failed", method="GET"):
+            g.db = database
+            with patch("app.get_current_user") as get_current_user:
+                with patch("app.record_application_event") as record_event:
+                    response = after_request(self.app.response_class(status=500))
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(database.rollback_count, 1)
+        get_current_user.assert_not_called()
+        record_event.assert_not_called()
+
+    def test_homepage_fails_cleanly_when_users_table_is_missing(self):
+        database_fd, database_path = tempfile.mkstemp()
+        os.close(database_fd)
+        try:
+            application = create_app({
+                "APP_ENV": "development",
+                "DATABASE": database_path,
+                "SECRET_KEY": "test-secret",
+                "TESTING": False,
+                "PROPAGATE_EXCEPTIONS": False,
+            })
+            client = application.test_client()
+            with client.session_transaction() as user_session:
+                user_session["user_id"] = 1
+
+            response = client.get("/")
+
+            self.assertEqual(response.status_code, 500)
+        finally:
+            if os.path.exists(database_path):
+                os.remove(database_path)
 
     def test_sqlite_import_rejects_source_without_users_table(self):
         source_fd, source_path = tempfile.mkstemp()

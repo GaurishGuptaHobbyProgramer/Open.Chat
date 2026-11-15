@@ -11,6 +11,8 @@ from urllib import request as urllib_request
 import click
 import psycopg
 from psycopg.rows import dict_row
+from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
 try:
     from dotenv import load_dotenv
 except ImportError:  # pragma: no cover - optional dependency
@@ -224,6 +226,58 @@ _REQUIRED_SCHEMA_COLUMNS = {
     "enormous_space": {"id", "name", "slug", "is_official", "is_pinned", "created_at"},
 }
 
+_REQUIRED_SCHEMA_INDEXES = {
+    "idx_conversation_messages_conversation_id_id",
+    "idx_call_signals_recipient",
+    "idx_application_events_created_at",
+}
+
+_REQUIRED_SCHEMA_KEY_CONSTRAINTS = {
+    ("users", "PRIMARY KEY", ("id",)),
+    ("messages", "PRIMARY KEY", ("id",)),
+    ("presence", "PRIMARY KEY", ("id",)),
+    ("user_settings", "PRIMARY KEY", ("user_id",)),
+    ("user_profiles", "PRIMARY KEY", ("user_id",)),
+    ("user_statuses", "PRIMARY KEY", ("id",)),
+    ("conversations", "PRIMARY KEY", ("id",)),
+    ("conversation_members", "PRIMARY KEY", ("id",)),
+    ("conversation_messages", "PRIMARY KEY", ("id",)),
+    ("conversation_read_state", "PRIMARY KEY", ("conversation_id", "user_id")),
+    ("conversation_typing", "PRIMARY KEY", ("conversation_id", "user_id")),
+    ("user_notifications", "PRIMARY KEY", ("id",)),
+    ("call_sessions", "PRIMARY KEY", ("id",)),
+    ("call_signals", "PRIMARY KEY", ("id",)),
+    ("application_events", "PRIMARY KEY", ("id",)),
+    ("enormous_space", "PRIMARY KEY", ("id",)),
+    ("presence", "UNIQUE", ("token",)),
+    ("conversation_members", "UNIQUE", ("conversation_id", "user_id")),
+    ("enormous_space", "UNIQUE", ("slug",)),
+}
+
+_REQUIRED_SCHEMA_FOREIGN_KEYS = {
+    ("user_settings", "user_id", "users", "id", "CASCADE"),
+    ("user_profiles", "user_id", "users", "id", "CASCADE"),
+    ("user_statuses", "user_id", "users", "id", "CASCADE"),
+    ("conversations", "created_by", "users", "id", "SET NULL"),
+    ("conversation_members", "conversation_id", "conversations", "id", "CASCADE"),
+    ("conversation_members", "user_id", "users", "id", "CASCADE"),
+    ("conversation_messages", "conversation_id", "conversations", "id", "CASCADE"),
+    ("conversation_messages", "sender_id", "users", "id", "CASCADE"),
+    ("conversation_read_state", "conversation_id", "conversations", "id", "CASCADE"),
+    ("conversation_read_state", "user_id", "users", "id", "CASCADE"),
+    ("conversation_typing", "conversation_id", "conversations", "id", "CASCADE"),
+    ("conversation_typing", "user_id", "users", "id", "CASCADE"),
+    ("user_notifications", "user_id", "users", "id", "CASCADE"),
+    ("user_notifications", "conversation_id", "conversations", "id", "SET NULL"),
+    ("user_notifications", "sender_id", "users", "id", "SET NULL"),
+    ("call_sessions", "caller_id", "users", "id", "CASCADE"),
+    ("call_sessions", "target_id", "users", "id", "CASCADE"),
+    ("call_sessions", "conversation_id", "conversations", "id", "SET NULL"),
+    ("call_signals", "call_id", "call_sessions", "id", "CASCADE"),
+    ("call_signals", "sender_id", "users", "id", "CASCADE"),
+    ("call_signals", "target_id", "users", "id", "CASCADE"),
+}
+
 _SQLITE_IMPORT_ID_TABLES = {
     "users",
     "messages",
@@ -256,6 +310,175 @@ _SQLITE_IMPORT_UNIQUE_KEYS = {
     "application_events": (("id",),),
     "enormous_space": (("id",), ("slug",)),
 }
+
+
+def _schema_validation_errors(
+    tables,
+    columns_by_table,
+    indexes,
+    key_constraints,
+    foreign_keys,
+    applied_revisions,
+    expected_revisions,
+):
+    errors = []
+    missing_tables = sorted(set(_SQLITE_IMPORT_TABLES).difference(tables))
+    if missing_tables:
+        errors.append("missing tables: " + ", ".join(missing_tables))
+
+    missing_columns = {
+        table_name: sorted(required_columns.difference(columns_by_table.get(table_name, set())))
+        for table_name, required_columns in _REQUIRED_SCHEMA_COLUMNS.items()
+        if required_columns.difference(columns_by_table.get(table_name, set()))
+    }
+    if missing_columns:
+        errors.append(
+            "missing columns: "
+            + "; ".join(
+                table_name + " (" + ", ".join(column_names) + ")"
+                for table_name, column_names in sorted(missing_columns.items())
+            )
+        )
+
+    missing_indexes = sorted(_REQUIRED_SCHEMA_INDEXES.difference(indexes))
+    if missing_indexes:
+        errors.append("missing indexes: " + ", ".join(missing_indexes))
+
+    missing_constraints = sorted(_REQUIRED_SCHEMA_KEY_CONSTRAINTS.difference(key_constraints))
+    if missing_constraints:
+        errors.append(
+            "missing primary/unique constraints: "
+            + ", ".join(
+                f"{table_name} {constraint_type.lower()} ({', '.join(columns)})"
+                for table_name, constraint_type, columns in missing_constraints
+            )
+        )
+
+    missing_foreign_keys = sorted(_REQUIRED_SCHEMA_FOREIGN_KEYS.difference(foreign_keys))
+    if missing_foreign_keys:
+        errors.append(
+            "missing foreign keys: "
+            + ", ".join(
+                f"{table_name}.{column} -> {referenced_table}.{referenced_column} ON DELETE {delete_rule}"
+                for table_name, column, referenced_table, referenced_column, delete_rule
+                in missing_foreign_keys
+            )
+        )
+
+    if applied_revisions != expected_revisions:
+        errors.append(
+            "Alembic revision mismatch: applied "
+            + (", ".join(sorted(applied_revisions)) or "none")
+            + "; expected "
+            + (", ".join(sorted(expected_revisions)) or "no migration heads")
+        )
+
+    return errors
+
+
+def _verify_postgresql_schema(application):
+    if application.config["DATABASE_BACKEND"] != "postgresql":
+        raise RuntimeError("Schema verification requires a PostgreSQL DATABASE_URL.")
+
+    try:
+        migration_config = AlembicConfig()
+        migration_config.set_main_option(
+            "script_location",
+            os.path.join(_project_root, "migrations").replace("\\", "/"),
+        )
+        expected_revisions = set(ScriptDirectory.from_config(migration_config).get_heads())
+
+        with application.app_context(), orm_db.engine.connect() as connection:
+            tables = set(connection.execute(text(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'"
+            )).scalars())
+            column_rows = connection.execute(text(
+                "SELECT table_name, column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema()"
+            ))
+            columns_by_table = {}
+            for table_name, column_name in column_rows:
+                columns_by_table.setdefault(table_name, set()).add(column_name)
+
+            indexes = set(connection.execute(text(
+                "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()"
+            )).scalars())
+
+            key_constraint_rows = connection.execute(text(
+                "SELECT tc.table_name, tc.constraint_name, tc.constraint_type, "
+                "kcu.column_name, kcu.ordinal_position "
+                "FROM information_schema.table_constraints tc "
+                "JOIN information_schema.key_column_usage kcu "
+                "ON tc.constraint_catalog = kcu.constraint_catalog "
+                "AND tc.constraint_schema = kcu.constraint_schema "
+                "AND tc.constraint_name = kcu.constraint_name "
+                "AND tc.table_name = kcu.table_name "
+                "WHERE tc.constraint_schema = current_schema() "
+                "AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE') "
+                "ORDER BY tc.table_name, tc.constraint_name, kcu.ordinal_position"
+            ))
+            constraint_columns = {}
+            for table_name, constraint_name, constraint_type, column_name, position in key_constraint_rows:
+                key = (table_name, constraint_name, constraint_type)
+                constraint_columns.setdefault(key, []).append((position, column_name))
+            key_constraints = {
+                (
+                    table_name,
+                    constraint_type,
+                    tuple(column for _, column in sorted(columns)),
+                )
+                for (table_name, _, constraint_type), columns in constraint_columns.items()
+            }
+
+            foreign_key_rows = connection.execute(text(
+                "SELECT tc.table_name, kcu.column_name, ccu.table_name, "
+                "ccu.column_name, rc.delete_rule "
+                "FROM information_schema.table_constraints tc "
+                "JOIN information_schema.key_column_usage kcu "
+                "ON tc.constraint_catalog = kcu.constraint_catalog "
+                "AND tc.constraint_schema = kcu.constraint_schema "
+                "AND tc.constraint_name = kcu.constraint_name "
+                "AND tc.table_name = kcu.table_name "
+                "JOIN information_schema.constraint_column_usage ccu "
+                "ON tc.constraint_catalog = ccu.constraint_catalog "
+                "AND tc.constraint_schema = ccu.constraint_schema "
+                "AND tc.constraint_name = ccu.constraint_name "
+                "JOIN information_schema.referential_constraints rc "
+                "ON tc.constraint_catalog = rc.constraint_catalog "
+                "AND tc.constraint_schema = rc.constraint_schema "
+                "AND tc.constraint_name = rc.constraint_name "
+                "WHERE tc.constraint_schema = current_schema() "
+                "AND tc.constraint_type = 'FOREIGN KEY'"
+            ))
+            foreign_keys = {tuple(row) for row in foreign_key_rows}
+            applied_revisions = set()
+            if "alembic_version" in tables:
+                applied_revisions = set(
+                    connection.execute(text("SELECT version_num FROM alembic_version")).scalars()
+                )
+    except SQLAlchemyError as exc:
+        application.logger.exception("PostgreSQL schema verification failed")
+        raise RuntimeError(
+            "Could not inspect PostgreSQL schema or Alembic history; startup is blocked."
+        ) from exc
+
+    validation_errors = _schema_validation_errors(
+        tables,
+        columns_by_table,
+        indexes,
+        key_constraints,
+        foreign_keys,
+        applied_revisions,
+        expected_revisions,
+    )
+    if validation_errors:
+        raise RuntimeError(
+            "PostgreSQL schema is incomplete or migration history is inconsistent ("
+            + "; ".join(validation_errors)
+            + "). Apply reviewed migrations and investigate schema drift. "
+            "No migration was stamped and no data was reset."
+        )
 
 
 def _count_source_duplicate_keys(source, table_name, key_columns):
@@ -2711,16 +2934,44 @@ def create_app(test_config=None):
     @app.after_request
     def record_failed_request(response):
         if response.status_code >= 400 and request.endpoint != "static":
+            db = g.get("db")
+            if db is not None:
+                try:
+                    db.rollback()
+                except (sqlite3.Error, psycopg.Error, psycopg2.Error, SQLAlchemyError):
+                    current_app.logger.exception("Could not roll back a failed request transaction")
+                    current_app.logger.error(
+                        "Could not record failed request for %s %s (HTTP %s)",
+                        request.method,
+                        request.path,
+                        response.status_code,
+                    )
+                    return response
+
+            if response.status_code >= 500:
+                current_app.logger.error(
+                    "Request failed for %s %s (HTTP %s)",
+                    request.method,
+                    request.path,
+                    response.status_code,
+                )
+                return response
+
             try:
-                user = get_current_user()
                 record_application_event(
                     "failed_request",
                     f"{request.method} request returned HTTP {response.status_code}",
                     endpoint=request.endpoint,
                     response_status=response.status_code,
-                    user_id=user["id"] if user else None,
+                    user_id=session.get("user_id"),
                 )
             except Exception:
+                db = g.get("db")
+                if db is not None:
+                    try:
+                        db.rollback()
+                    except (sqlite3.Error, psycopg.Error, psycopg2.Error, SQLAlchemyError):
+                        current_app.logger.exception("Could not roll back a failed request audit write")
                 current_app.logger.exception("Could not record failed request")
         return response
 
@@ -3719,53 +3970,14 @@ def create_app(test_config=None):
 
     @app.cli.command("verify-schema")
     def verify_schema_command():
-        if app.config["DATABASE_BACKEND"] != "postgresql":
-            raise click.ClickException("Schema verification requires a PostgreSQL DATABASE_URL.")
-
         try:
-            with orm_db.engine.connect() as connection:
-                tables = set(connection.execute(text(
-                    "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'"
-                )).scalars())
-                missing_tables = sorted(set(_SQLITE_IMPORT_TABLES).difference(tables))
-                column_rows = connection.execute(text(
-                    "SELECT table_name, column_name FROM information_schema.columns "
-                    "WHERE table_schema = current_schema()"
-                ))
-                columns_by_table = {}
-                for table_name, column_name in column_rows:
-                    columns_by_table.setdefault(table_name, set()).add(column_name)
-                missing_columns = {
-                    table_name: sorted(required_columns.difference(columns_by_table.get(table_name, set())))
-                    for table_name, required_columns in _REQUIRED_SCHEMA_COLUMNS.items()
-                    if required_columns.difference(columns_by_table.get(table_name, set()))
-                }
-                if missing_tables or missing_columns:
-                    details = []
-                    if missing_tables:
-                        details.append("missing tables: " + ", ".join(missing_tables))
-                    if missing_columns:
-                        details.append(
-                            "missing columns: "
-                            + "; ".join(
-                                table_name + " (" + ", ".join(column_names) + ")"
-                                for table_name, column_names in sorted(missing_columns.items())
-                            )
-                        )
-                    raise click.ClickException(
-                        "PostgreSQL schema is incomplete (" + "; ".join(details)
-                        + "). Apply and verify migrations before serving traffic."
-                    )
-        except SQLAlchemyError as exc:
-            app.logger.exception("PostgreSQL schema verification failed")
-            raise click.ClickException(
-                "Could not verify the PostgreSQL schema. Check the server logs."
-            ) from exc
+            _verify_postgresql_schema(app)
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc)) from exc
 
         click.echo(
-            f"PostgreSQL schema verified: all {len(_SQLITE_IMPORT_TABLES)} application tables "
-            "and expected columns are present."
+            f"PostgreSQL schema verified: {len(_SQLITE_IMPORT_TABLES)} application tables, "
+            "required columns, keys, indexes, foreign keys, and Alembic heads are present."
         )
 
     @app.cli.command("import-sqlite")

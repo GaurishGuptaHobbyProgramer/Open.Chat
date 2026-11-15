@@ -27,9 +27,12 @@ It normally has a `-pooler` hostname. In Render, set:
 | `OPENCHAT_DEVELOPER_USER_ID` | Existing admin/developer user ID(s), if applicable |
 
 Use Render's secret/environment-variable UI. `render.yaml` intentionally uses
-`sync: false` for credentials and does not provision a Render database or run
-migrations automatically. Do not copy URLs or passwords into GitHub, source
-files, logs, or issue reports.
+`sync: false` for credentials and does not provision a Render database. Its
+start command runs `scripts/start.sh`, which applies pending migrations and
+verifies the schema before starting Gunicorn. The Render dashboard can override
+the Blueprint start command; confirm that its configured command still runs
+this script. Do not copy URLs or passwords into GitHub, source files, logs, or
+issue reports.
 
 Neon's pooled URL is appropriate for normal request traffic. Use Neon’s
 **direct, unpooled** URL for `pg_dump`, `pg_restore`, and restore/migration
@@ -52,12 +55,24 @@ flask --app app db current
 flask --app app db history
 ```
 
-Render's start command runs `flask --app app db upgrade` and
-`flask --app app verify-schema` before Gunicorn starts. Review each revision
-before deployment. The upgrade applies only pending revisions; the schema
-check confirms all expected application tables and baseline columns are
-present. A failed migration or check prevents the web process from
-starting.
+Render's start command runs `scripts/start.sh`. It invokes
+`python -m flask --app app db upgrade`, then
+`python -m flask --app app verify-schema`, and only then executes Gunicorn as
+`wsgi:app`. The WSGI import independently verifies the PostgreSQL schema before
+serving requests. Review each revision before deployment. Verification checks
+the expected Alembic heads, application tables, columns, primary/unique
+constraints, indexes, and foreign keys. A failed migration or check exits
+non-zero and prevents the web process from starting.
+
+The initial revision `20261115_01` creates `users` first and includes the
+other 15 application tables, their keys, foreign keys, and three explicit
+indexes. If Render serves requests while `users` is missing, the running
+release is not using the checked-in startup path, is connected to a different
+schema/database than expected, or has migration-history/schema drift. Check
+Render's effective start command and secret/environment group, then inspect
+`flask db current` and the schema in a separate reviewed session. A revision
+record alone does not prove that tables exist. Do not stamp, drop, reset, or
+import data to address this error.
 
 If the database already contains application tables but has no Alembic version
 record, the upgrade will fail safely rather than recreate tables or overwrite

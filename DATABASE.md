@@ -1,11 +1,14 @@
 # Database and deployment
 
 Open.Chat uses SQLite (`chat.db`) for local development and Neon PostgreSQL for
-production. Render applies pending Alembic migrations and verifies the required
-PostgreSQL schema before starting Gunicorn. Database connections are pooled and
-scoped to a Flask application context. Automatic database synchronization is
-not yet implemented; see [DATABASE_SYNC.md](./DATABASE_SYNC.md) for the proposed
-design and production review gates.
+production. Render runs `scripts/start.sh`, which applies pending Alembic
+migrations and verifies the PostgreSQL schema before starting Gunicorn as
+`wsgi:app`. The WSGI entry point independently verifies the schema before
+serving requests.
+Database connections are pooled and scoped to a Flask application context.
+Automatic database synchronization is not yet implemented; see
+[DATABASE_SYNC.md](./DATABASE_SYNC.md) for the proposed design and production
+review gates.
 
 ## Environment variables
 
@@ -36,12 +39,19 @@ pip install -r requirements.txt
 flask --app app db upgrade
 ```
 
-Render runs `flask --app app db upgrade` and then
-`flask --app app verify-schema` on every start. Alembic applies only pending,
-versioned upgrades; the verification command checks all application tables and
-expected columns from the baseline schema. A failure prevents Gunicorn from
-starting and should be resolved from the server logs before retrying. Review
-each new migration before deployment and keep it additive/data-preserving.
+Render's start script runs `python -m flask --app app db upgrade` followed by
+`python -m flask --app app verify-schema` on every start. Verification checks
+the expected Alembic heads, application tables, columns, primary/unique
+constraints, indexes, and foreign keys. A failure prevents Gunicorn from
+starting. Review each migration before deployment and keep it
+additive/data-preserving. Confirm the Render dashboard has not overridden the
+Blueprint start command.
+
+The initial migration creates the `users` table. If it is absent in a live
+service, the deployed process likely bypassed the checked-in startup path, is
+using a different database/schema, or has Alembic-history/schema drift. Check
+the effective Render command and database settings before making any change.
+Do not stamp, drop, reset, or import SQLite data to fix a missing table.
 The initial migration only creates the schema; it does not drop tables, delete
 rows, or seed accounts. Its downgrade intentionally refuses to run. Do not use
 `flask db downgrade` as a production recovery procedure.
