@@ -107,75 +107,27 @@ blindly.
 
 ## Safe SQLite-to-PostgreSQL transfer
 
-The importer reads SQLite in read-only mode. It preserves primary keys and
-password hashes, checks supported columns, reports row counts, source duplicate
-keys, and destination key collisions, then refuses to merge into any
-non-empty application table. A successful import inserts in dependency order
-inside one PostgreSQL transaction, updates identity sequences, and verifies
-row counts before commit. It also checks SQLite integrity and foreign-key
-consistency before import. A non-dry-run command creates and verifies a
-read-only SQLite snapshot before opening the PostgreSQL target; by default the
-snapshot is written under `~/OpenChatBackups`, or to the directory passed with
-`--backup-dir` or `OPENCHAT_SQLITE_BACKUP_DIR`. Dry runs do not create a
-snapshot. The importer does not make a PostgreSQL backup; complete and verify
-the encrypted PostgreSQL backup procedure in [BACKUP_SETUP.md](./BACKUP_SETUP.md)
-before any real import. No deployment command invokes the importer.
+Use the standalone
+[`scripts/migrate_sqlite_to_postgres.py`](./scripts/migrate_sqlite_to_postgres.py)
+for a manual, repeatable merge into PostgreSQL. It preserves IDs and source
+values, skips primary-key and other unique-key conflicts, validates source and
+destination schemas, uses a consistent read-only SQLite snapshot, and applies
+all inserts in one transaction. A failed or interrupted run rolls back and can
+be retried. PostgreSQL sequences are advanced after explicit IDs are inserted.
 
-The database contains attachment metadata, but the importer does not copy
-attachment bytes from `static/uploads`. Those files need a separate verified
-transfer to private object storage before cutover; metadata-only import can
-leave links pointing at files unavailable in production. See
-[DATABASE_SYNC.md](./DATABASE_SYNC.md) for the proposed, currently inactive
-synchronization and object-storage design.
+Before each real run, make and verify a PostgreSQL backup. Set `DATABASE_URL`
+in the current shell without storing or logging the credential. Run
+`python scripts\migrate_sqlite_to_postgres.py --dry-run` first, review the
+per-table preview, then execute without `--dry-run`. Full instructions and
+report interpretation are in [`scripts/README.md`](./scripts/README.md).
+The older `flask --app app import-sqlite` command remains empty-target-only;
+it must not be used to merge into populated PostgreSQL. No deployment command
+automatically invokes either importer.
 
-1. Stop or gate writes to the source database. Keep a verified copy of
-   `chat.db`.
-2. Create an empty Neon branch/database for the migration and apply
-   `flask --app app db upgrade` to it. Do not allow application traffic or
-   account creation against it yet.
-3. From a trusted Windows machine that can reach Neon, load the direct URL from
-   the ignored `.env.backup` into this PowerShell process without echoing it:
-
-   ```powershell
-   . .\scripts\backup_common.ps1
-   $backupConfig = Read-OpenChatBackupConfig
-   $env:DATABASE_URL = $backupConfig["PG_DUMP_DATABASE_URL"]
-   $env:APP_ENV = "development"
-   ```
-
-   Do not paste the URL into a tracked file or share a terminal transcript.
-4. Run the read-only preview:
-
-   ```powershell
-   flask --app app import-sqlite --dry-run "C:\path\to\chat.db"
-   ```
-
-   The command must report zero destination rows, zero source duplicate keys,
-   and zero target key collisions. If it reports otherwise, stop. The
-   non-empty target policy is intentional; the tool will not merge or replace
-   records.
-5. After reviewing the preview, execute the transaction:
-
-   ```powershell
-   flask --app app import-sqlite "C:\path\to\chat.db"
-   ```
-
-6. Review the per-table `source rows`, `verified rows`, and completion report.
-   Keep the source backup and do not cut over until account login, password
-   verification, admin access, profiles, settings, conversations, groups, and
-   messages have been checked.
-7. Set Render's `DATABASE_URL` to the Neon **pooled** URL and verify the
-   application before opening traffic. Keep `OPENCHAT_DEVELOPER_USER_ID`
-   consistent with the preserved account IDs.
-8. Remove the process-scoped URL when finished:
-
-   ```powershell
-   Remove-Item Env:DATABASE_URL
-   ```
-
-The importer does not rewrite user records or passwords. It cannot safely
-merge into a Neon database already containing data. Preserve and investigate
-that data rather than trying to bypass the empty-target checks.
+The transfer includes database rows and attachment metadata, not file bytes
+under `static/uploads`. A separate verified file transfer may be needed.
+See [DATABASE_SYNC.md](./DATABASE_SYNC.md) for the inactive synchronization
+proposal; this importer is not continuous synchronization.
 
 ## Rollback and recovery
 

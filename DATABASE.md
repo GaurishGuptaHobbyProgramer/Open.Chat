@@ -76,55 +76,23 @@ changes. Never stamp a database whose schema has not been checked.
 
 ## Copying SQLite data to PostgreSQL
 
-The one-way `import-sqlite` command preserves IDs and password hashes. It opens
-the source SQLite file read-only, supports the application's known tables, and
-reports source/destination counts and key collisions. Use `--dry-run` first.
-The importer checks SQLite integrity and foreign keys, refuses non-empty
-targets, unsupported source tables/columns, or collisions, and creates a
-verified SQLite backup before a real import. The default backup directory is
-`~/OpenChatBackups`; override it with `--backup-dir` or
-`OPENCHAT_SQLITE_BACKUP_DIR`. Inserts run in one transaction; a failure rolls
-the target transaction back. It never updates or replaces existing PostgreSQL
-data. This does not back up the PostgreSQL target; run and verify the encrypted
-PostgreSQL backup procedure before importing.
+For a manual, repeatable merge that skips existing keys without overwriting
+PostgreSQL, use the standalone
+[`scripts/migrate_sqlite_to_postgres.py`](./scripts/migrate_sqlite_to_postgres.py).
+It validates both schemas and the SQLite source, reads a consistent
+read-only snapshot, migrates tables in foreign-key order inside one PostgreSQL
+transaction, and advances sequences after explicit IDs are inserted. Use its
+`--dry-run` option first and back up PostgreSQL before every real run. Setup,
+commands, and report details are in [`scripts/README.md`](./scripts/README.md).
 
-Attachment metadata is in SQLite, but the importer does not move bytes stored
-under `static/uploads`. Transfer those files separately to private object
-storage before cutover or their links may not work in production.
+The older `flask --app app import-sqlite` command is intentionally stricter:
+it refuses non-empty target tables and is not the merge workflow. Do not use
+it to merge into an existing production database. Neither command performs
+automatic synchronization or backs up PostgreSQL.
 
-1. Stop or gate account creation and other writes while preparing the cutover.
-2. Make a separate backup of `chat.db`. For example:
-
-   ```powershell
-   $backupDirectory = Join-Path $env:USERPROFILE "OpenChatBackups"
-   $null = New-Item -ItemType Directory -Force -Path $backupDirectory
-   $env:OPENCHAT_SQLITE_BACKUP = Join-Path $backupDirectory "chat.db.backup"
-   python -c "import os,sqlite3; s=sqlite3.connect('chat.db'); d=sqlite3.connect(os.environ['OPENCHAT_SQLITE_BACKUP']); s.backup(d); d.close(); s.close()"
-   Get-FileHash -LiteralPath $env:OPENCHAT_SQLITE_BACKUP -Algorithm SHA256
-   ```
-
-   Keep this file outside the repository and verify its hash before proceeding.
-3. Provision PostgreSQL and apply the baseline migration. Do not serve traffic
-   or create accounts in the new database before importing; the importer
-   deliberately refuses a non-empty target.
-4. From a machine that can reach the PostgreSQL server, set `DATABASE_URL` to
-   the destination direct connection URL using a protected environment/secret
-   store. First run a read-only preview:
-
-   ```powershell
-   flask --app app import-sqlite --dry-run "C:\path\to\chat.db"
-   ```
-
-   Proceed only if the preview reports an empty target and no key collisions.
-   Then run the same command without `--dry-run` to import. Do not put
-   credentials in source files or shared logs.
-5. Check the command's per-table row counts and verify sign-in, conversations,
-   messages, profiles, and settings before directing users to the new service.
-   Keep the SQLite backup until the production data has been independently
-   verified.
-
-If an existing PostgreSQL database already has application rows, stop and
-review the data. The importer will not merge into or overwrite it.
+Both tools transfer database rows only. Attachment metadata may refer to bytes
+stored under `static/uploads`; transfer those files separately if their links
+need to work in production.
 
 ## Render
 

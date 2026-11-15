@@ -133,10 +133,11 @@ counts—not event payloads or credentials.
 
 ## Current limitation
 
-Only the one-time SQLite-to-PostgreSQL importer exists. It preserves row IDs
-and password hashes, refuses non-empty target application tables, and imports
-inside one PostgreSQL transaction. A real import requires an empty, reviewed
-target and a separately verified PostgreSQL backup. Each non-dry-run import
-now also creates and verifies a local SQLite snapshot before contacting the
-target. The importer transfers database metadata only, not files under
+The standalone one-time SQLite-to-PostgreSQL script preserves row IDs and
+password hashes, skips rows that conflict with existing primary or unique
+keys, and imports inside one PostgreSQL transaction. It validates both
+schemas, checks a consistent read-only SQLite snapshot, and supports a dry
+run. A real import requires a separately verified PostgreSQL backup. The
+older Flask importer remains empty-target-only. Neither tool synchronizes
+continuously, and database migration does not copy files under
 `static/uploads`.
