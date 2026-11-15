@@ -52,10 +52,17 @@ flask --app app db current
 flask --app app db history
 ```
 
-For Render, set its Neon `DATABASE_URL`, open the Render Shell for the service,
-and run `flask --app app db upgrade` there before directing traffic to a new
-schema. Deployments do not run migrations or recreate the database. Review each
-revision before applying it.
+Render's start command runs `flask --app app db upgrade` and
+`flask --app app verify-schema` before Gunicorn starts. Review each revision
+before deployment. The upgrade applies only pending revisions; the schema
+check confirms all expected application tables and baseline columns are
+present. A failed migration or check prevents the web process from
+starting.
+
+If the database already contains application tables but has no Alembic version
+record, the upgrade will fail safely rather than recreate tables or overwrite
+data. Compare the database schema with the complete baseline before manually
+stamping it. Render startup never stamps a database.
 
 The app's queries are not represented as SQLAlchemy ORM models, so Alembic
 autogeneration does not know the complete schema. Create explicit revisions
@@ -90,7 +97,21 @@ password hashes, checks supported columns, reports row counts, source duplicate
 keys, and destination key collisions, then refuses to merge into any
 non-empty application table. A successful import inserts in dependency order
 inside one PostgreSQL transaction, updates identity sequences, and verifies
-row counts before commit. No deployment command invokes it.
+row counts before commit. It also checks SQLite integrity and foreign-key
+consistency before import. A non-dry-run command creates and verifies a
+read-only SQLite snapshot before opening the PostgreSQL target; by default the
+snapshot is written under `~/OpenChatBackups`, or to the directory passed with
+`--backup-dir` or `OPENCHAT_SQLITE_BACKUP_DIR`. Dry runs do not create a
+snapshot. The importer does not make a PostgreSQL backup; complete and verify
+the encrypted PostgreSQL backup procedure in [BACKUP_SETUP.md](./BACKUP_SETUP.md)
+before any real import. No deployment command invokes the importer.
+
+The database contains attachment metadata, but the importer does not copy
+attachment bytes from `static/uploads`. Those files need a separate verified
+transfer to private object storage before cutover; metadata-only import can
+leave links pointing at files unavailable in production. See
+[DATABASE_SYNC.md](./DATABASE_SYNC.md) for the proposed, currently inactive
+synchronization and object-storage design.
 
 1. Stop or gate writes to the source database. Keep a verified copy of
    `chat.db`.

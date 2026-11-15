@@ -1,9 +1,11 @@
 # Database and deployment
 
 Open.Chat uses SQLite (`chat.db`) for local development and Neon PostgreSQL for
-production. The application does not create, reset, or migrate the production
-schema at web-process startup. Database connections are pooled and scoped to a
-Flask application context.
+production. Render applies pending Alembic migrations and verifies the required
+PostgreSQL schema before starting Gunicorn. Database connections are pooled and
+scoped to a Flask application context. Automatic database synchronization is
+not yet implemented; see [DATABASE_SYNC.md](./DATABASE_SYNC.md) for the proposed
+design and production review gates.
 
 ## Environment variables
 
@@ -27,19 +29,28 @@ Never commit a real connection URL or secret. `.env` is ignored by Git.
 
 ## Schema migrations
 
-Install dependencies and apply reviewed migrations before running the web
-process:
+Install dependencies and apply reviewed migrations locally with:
 
 ```powershell
 pip install -r requirements.txt
 flask --app app db upgrade
 ```
 
-Render does not run schema migrations automatically. Apply reviewed migrations
-manually before directing traffic to a new or changed schema. The initial
-migration only creates the schema; it does not drop tables, delete rows, or
-seed accounts. Its downgrade intentionally refuses to run. Do not use
+Render runs `flask --app app db upgrade` and then
+`flask --app app verify-schema` on every start. Alembic applies only pending,
+versioned upgrades; the verification command checks all application tables and
+expected columns from the baseline schema. A failure prevents Gunicorn from
+starting and should be resolved from the server logs before retrying. Review
+each new migration before deployment and keep it additive/data-preserving.
+The initial migration only creates the schema; it does not drop tables, delete
+rows, or seed accounts. Its downgrade intentionally refuses to run. Do not use
 `flask db downgrade` as a production recovery procedure.
+
+If a PostgreSQL database already has application tables but no Alembic version
+record, the upgrade will stop rather than recreate tables or overwrite data.
+Compare its schema with the complete baseline first; only then use
+`flask --app app db stamp 20261115_01` as a deliberate, manually verified
+operation. The automatic Render startup does not stamp databases.
 
 The application currently uses SQL statements rather than SQLAlchemy ORM
 models, so Alembic autogeneration cannot reliably infer schema changes. Create
@@ -58,9 +69,18 @@ changes. Never stamp a database whose schema has not been checked.
 The one-way `import-sqlite` command preserves IDs and password hashes. It opens
 the source SQLite file read-only, supports the application's known tables, and
 reports source/destination counts and key collisions. Use `--dry-run` first.
-The importer refuses non-empty targets, unsupported source tables/columns, or
-collisions. Inserts run in one transaction; a failure rolls the target
-transaction back. It never updates or replaces existing PostgreSQL data.
+The importer checks SQLite integrity and foreign keys, refuses non-empty
+targets, unsupported source tables/columns, or collisions, and creates a
+verified SQLite backup before a real import. The default backup directory is
+`~/OpenChatBackups`; override it with `--backup-dir` or
+`OPENCHAT_SQLITE_BACKUP_DIR`. Inserts run in one transaction; a failure rolls
+the target transaction back. It never updates or replaces existing PostgreSQL
+data. This does not back up the PostgreSQL target; run and verify the encrypted
+PostgreSQL backup procedure before importing.
+
+Attachment metadata is in SQLite, but the importer does not move bytes stored
+under `static/uploads`. Transfer those files separately to private object
+storage before cutover or their links may not work in production.
 
 1. Stop or gate account creation and other writes while preparing the cutover.
 2. Make a separate backup of `chat.db`. For example:

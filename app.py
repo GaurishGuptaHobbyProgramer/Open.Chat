@@ -5,7 +5,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 from urllib import error as urllib_error
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from urllib import request as urllib_request
 
 import click
@@ -21,6 +21,7 @@ from flask import Flask, g, current_app, has_app_context, jsonify, redirect, ren
 from flask_migrate import Migrate
 from flask_sqlalchemy import SQLAlchemy
 import psycopg2
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
@@ -199,6 +200,30 @@ _SQLITE_IMPORT_TABLES = (
     "enormous_space",
 )
 
+_REQUIRED_SCHEMA_COLUMNS = {
+    "users": {"id", "username", "password_hash", "created_at", "is_suspended", "suspended_at", "suspended_by"},
+    "messages": {"id", "username", "message", "created_at", "attachment_name", "attachment_type", "attachment_url", "attachment_size"},
+    "presence": {"id", "token", "created_at"},
+    "user_settings": {"user_id", "name", "personality", "greeting"},
+    "user_profiles": {"user_id", "display_name", "bio", "status", "avatar_url", "updated_at"},
+    "user_statuses": {"id", "user_id", "text", "media_url", "created_at", "expires_at"},
+    "conversations": {"id", "kind", "title", "created_by", "created_at", "last_message_at", "is_archived", "is_muted", "is_pinned"},
+    "conversation_members": {"id", "conversation_id", "user_id", "role", "joined_at"},
+    "conversation_messages": {
+        "id", "conversation_id", "sender_id", "text", "created_at", "status", "reply_to",
+        "attachment_name", "attachment_type", "attachment_url", "attachment_size", "legacy_message_id",
+    },
+    "conversation_read_state": {"conversation_id", "user_id", "last_read_at"},
+    "conversation_typing": {"conversation_id", "user_id", "is_typing", "updated_at"},
+    "user_notifications": {
+        "id", "user_id", "kind", "title", "body", "link", "conversation_id", "sender_id", "is_read", "created_at",
+    },
+    "call_sessions": {"id", "caller_id", "target_id", "conversation_id", "mode", "status", "created_at", "updated_at"},
+    "call_signals": {"id", "call_id", "sender_id", "target_id", "signal_type", "payload", "created_at"},
+    "application_events": {"id", "event_type", "detail", "endpoint", "response_status", "user_id", "created_at"},
+    "enormous_space": {"id", "name", "slug", "is_official", "is_pinned", "created_at"},
+}
+
 _SQLITE_IMPORT_ID_TABLES = {
     "users",
     "messages",
@@ -265,9 +290,45 @@ def _count_target_key_collisions(source, target_cursor, table_name, key_columns)
     return collisions
 
 
+def _sqlite_read_only_uri(source_path):
+    normalized_path = os.path.abspath(source_path).replace("\\", "/")
+    return "file:" + quote(normalized_path, safe="/:") + "?mode=ro"
+
+
+def _create_sqlite_backup(source_path, backup_directory=None):
+    backup_directory = (
+        backup_directory
+        or os.environ.get("OPENCHAT_SQLITE_BACKUP_DIR")
+        or os.path.join(os.path.expanduser("~"), "OpenChatBackups")
+    )
+    os.makedirs(backup_directory, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    backup_path = os.path.join(
+        backup_directory,
+        f"openchat-sqlite-{timestamp}-{uuid.uuid4().hex[:8]}.db",
+    )
+    source = sqlite3.connect(_sqlite_read_only_uri(source_path), uri=True)
+    backup = None
+    try:
+        backup = sqlite3.connect(backup_path)
+        source.backup(backup)
+        integrity = backup.execute("PRAGMA quick_check").fetchone()[0]
+        if integrity != "ok":
+            raise RuntimeError(f"SQLite backup integrity check failed: {integrity}")
+    except Exception:
+        if backup is not None:
+            backup.close()
+        source.close()
+        if os.path.exists(backup_path):
+            os.remove(backup_path)
+        raise
+    backup.close()
+    source.close()
+    return backup_path
+
+
 def _import_sqlite_data(source_path, target_connection, dry_run=False):
-    source_uri = "file:" + os.path.abspath(source_path).replace("\\", "/") + "?mode=ro"
-    source = sqlite3.connect(source_uri, uri=True)
+    source = sqlite3.connect(_sqlite_read_only_uri(source_path), uri=True)
     target_cursor = None
     report = {
         "dry_run": dry_run,
@@ -287,6 +348,20 @@ def _import_sqlite_data(source_path, target_connection, dry_run=False):
         source_tables.discard("alembic_version")
         if "users" not in source_tables:
             raise ValueError("Source database does not contain the required users table.")
+        integrity = source.execute("PRAGMA quick_check").fetchone()[0]
+        if integrity != "ok":
+            raise ValueError(f"Source SQLite database failed its integrity check: {integrity}")
+        foreign_key_violations = source.execute("PRAGMA foreign_key_check").fetchall()
+        if foreign_key_violations:
+            examples = ", ".join(
+                f"{row[0]} row {row[1]} references {row[2]}"
+                for row in foreign_key_violations[:5]
+            )
+            raise ValueError(
+                f"Source SQLite database has {len(foreign_key_violations)} foreign-key violations"
+                + (f" ({examples})" if examples else "")
+                + "; no data was imported."
+            )
         unsupported_tables = source_tables.difference(_SQLITE_IMPORT_TABLES)
         if unsupported_tables:
             raise ValueError(
@@ -1789,16 +1864,24 @@ def register_user(username, password):
     password_hash = generate_password_hash(password)
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    cursor = db.execute(
-        "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-        (generated_username, password_hash, timestamp),
-    )
-    db.commit()
-
-    user = db.execute(
-        "SELECT id, username, created_at FROM users WHERE id = ?",
-        (cursor.lastrowid,),
-    ).fetchone()
+    try:
+        cursor = db.execute(
+            "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
+            (generated_username, password_hash, timestamp),
+        )
+        user = db.execute(
+            "SELECT id, username, created_at FROM users WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        if user is None:
+            raise RuntimeError("The newly registered user could not be read back.")
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except (sqlite3.Error, psycopg.Error, psycopg2.Error, SQLAlchemyError):
+            current_app.logger.exception("Could not roll back a failed account registration")
+        raise
 
     session["user_id"] = user["id"]
     session.permanent = True
@@ -1806,7 +1889,7 @@ def register_user(username, password):
     try:
         ensure_enormous_member(user["id"], db)
     except Exception:
-        pass
+        current_app.logger.exception("Could not add a newly registered user to the default conversation")
 
     return {
         "id": user["id"],
@@ -2963,14 +3046,19 @@ def create_app(test_config=None):
                 password = request.form.get("password") or ""
                 if not username or not password:
                     form_error = "Please enter both username and password."
-                elif authenticate_user(username, password):
-                    default_destination = (
-                        url_for("developer_control_center")
-                        if is_developer_user()
-                        else url_for("home")
-                    )
-                    return redirect(request.args.get("next") or default_destination)
                 else:
+                    try:
+                        authenticated = authenticate_user(username, password)
+                    except Exception:
+                        current_app.logger.exception("Authentication failed due to an internal error")
+                        raise
+                    if authenticated:
+                        default_destination = (
+                            url_for("developer_control_center")
+                            if is_developer_user()
+                            else url_for("home")
+                        )
+                        return redirect(request.args.get("next") or default_destination)
                     form_error = "Invalid username or password."
 
         return render_template(
@@ -3629,24 +3717,96 @@ def create_app(test_config=None):
                             missing_ids,
                         )
 
+    @app.cli.command("verify-schema")
+    def verify_schema_command():
+        if app.config["DATABASE_BACKEND"] != "postgresql":
+            raise click.ClickException("Schema verification requires a PostgreSQL DATABASE_URL.")
+
+        try:
+            with orm_db.engine.connect() as connection:
+                tables = set(connection.execute(text(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'"
+                )).scalars())
+                missing_tables = sorted(set(_SQLITE_IMPORT_TABLES).difference(tables))
+                column_rows = connection.execute(text(
+                    "SELECT table_name, column_name FROM information_schema.columns "
+                    "WHERE table_schema = current_schema()"
+                ))
+                columns_by_table = {}
+                for table_name, column_name in column_rows:
+                    columns_by_table.setdefault(table_name, set()).add(column_name)
+                missing_columns = {
+                    table_name: sorted(required_columns.difference(columns_by_table.get(table_name, set())))
+                    for table_name, required_columns in _REQUIRED_SCHEMA_COLUMNS.items()
+                    if required_columns.difference(columns_by_table.get(table_name, set()))
+                }
+                if missing_tables or missing_columns:
+                    details = []
+                    if missing_tables:
+                        details.append("missing tables: " + ", ".join(missing_tables))
+                    if missing_columns:
+                        details.append(
+                            "missing columns: "
+                            + "; ".join(
+                                table_name + " (" + ", ".join(column_names) + ")"
+                                for table_name, column_names in sorted(missing_columns.items())
+                            )
+                        )
+                    raise click.ClickException(
+                        "PostgreSQL schema is incomplete (" + "; ".join(details)
+                        + "). Apply and verify migrations before serving traffic."
+                    )
+        except SQLAlchemyError as exc:
+            app.logger.exception("PostgreSQL schema verification failed")
+            raise click.ClickException(
+                "Could not verify the PostgreSQL schema. Check the server logs."
+            ) from exc
+
+        click.echo(
+            f"PostgreSQL schema verified: all {len(_SQLITE_IMPORT_TABLES)} application tables "
+            "and expected columns are present."
+        )
+
     @app.cli.command("import-sqlite")
     @click.argument("source_path", type=click.Path(exists=True, dir_okay=False, readable=True))
     @click.option("--dry-run", is_flag=True, help="Report counts and collisions without importing rows.")
-    def import_sqlite_command(source_path, dry_run):
+    @click.option(
+        "--backup-dir",
+        type=click.Path(file_okay=False),
+        help="Directory for the automatic source snapshot (defaults to OPENCHAT_SQLITE_BACKUP_DIR or ~/OpenChatBackups).",
+    )
+    def import_sqlite_command(source_path, dry_run, backup_dir):
         if app.config["DATABASE_BACKEND"] != "postgresql":
             raise click.ClickException("The import target must be PostgreSQL; set DATABASE_URL to its connection URL.")
+        backup_path = None
+        if not dry_run:
+            try:
+                backup_path = _create_sqlite_backup(source_path, backup_dir)
+            except (OSError, sqlite3.Error, RuntimeError) as exc:
+                raise click.ClickException(f"Could not create a verified SQLite source backup: {exc}") from exc
         try:
             report = _import_sqlite_data(source_path, get_db()._connection, dry_run=dry_run)
         except (ValueError, sqlite3.Error) as exc:
-            raise click.ClickException(str(exc)) from exc
+            message = str(exc)
+            if backup_path:
+                message += f" Source backup retained at: {backup_path}"
+            raise click.ClickException(message) from exc
         except (psycopg.Error, psycopg2.Error) as exc:
             app.logger.exception("SQLite-to-PostgreSQL import failed; the target transaction was rolled back")
+            backup_message = f" Source backup retained at: {backup_path}" if backup_path else ""
             raise click.ClickException(
-                "The import failed and the target transaction was rolled back. Check application logs."
+                "The import failed and the target transaction was rolled back. "
+                "Check application logs." + backup_message
             ) from exc
         except RuntimeError as exc:
-            raise click.ClickException(str(exc)) from exc
+            message = str(exc)
+            if backup_path:
+                message += f" Source backup retained at: {backup_path}"
+            raise click.ClickException(message) from exc
 
+        if backup_path:
+            report["source_backup"] = backup_path
         click.echo("SQLite import dry-run report:" if dry_run else "SQLite import report:")
         click.echo("table | source rows | target rows | duplicate source keys | target key collisions | verified rows")
         for table_name, details in report["tables"].items():
@@ -3657,6 +3817,8 @@ def create_app(test_config=None):
             )
         if report["unsupported_target_data"]:
             click.echo("Non-empty target tables: " + ", ".join(report["unsupported_target_data"]))
+        if backup_path:
+            click.echo(f"Verified source backup: {backup_path}")
         if not report["safe_to_import"]:
             raise click.ClickException("Import stopped: resolve target data or key collisions; no rows were written.")
         if dry_run:

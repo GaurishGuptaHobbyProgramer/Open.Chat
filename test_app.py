@@ -44,6 +44,7 @@ from app import (
     _is_postgres_url,
     _normalize_postgres_url,
     _import_sqlite_data,
+    _create_sqlite_backup,
     update_user_profile,
 )
 
@@ -81,6 +82,11 @@ class ChatDatabaseTest(unittest.TestCase):
                     "DATABASE": self.db_path,
                 })
 
+    def test_schema_verification_requires_postgresql(self):
+        result = self.app.test_cli_runner().invoke(args=["verify-schema"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("requires a PostgreSQL DATABASE_URL", result.output)
+
     def test_sqlite_import_rejects_source_without_users_table(self):
         source_fd, source_path = tempfile.mkstemp()
         os.close(source_fd)
@@ -110,6 +116,80 @@ class ChatDatabaseTest(unittest.TestCase):
             self.assertTrue(target.test_cursor.closed)
         finally:
             os.remove(source_path)
+
+    def test_sqlite_import_rejects_foreign_key_violations_before_writing(self):
+        source_fd, source_path = tempfile.mkstemp()
+        os.close(source_fd)
+
+        class FakeCursor:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        class FakeConnection:
+            def __init__(self):
+                self.test_cursor = FakeCursor()
+                self.rolled_back = False
+
+            def cursor(self):
+                return self.test_cursor
+
+            def rollback(self):
+                self.rolled_back = True
+
+        source = sqlite3.connect(source_path)
+        source.execute("CREATE TABLE users (id INTEGER PRIMARY KEY)")
+        source.execute(
+            "CREATE TABLE child (user_id INTEGER REFERENCES users(id))"
+        )
+        source.execute("INSERT INTO child VALUES (99)")
+        source.commit()
+        source.close()
+
+        target = FakeConnection()
+        try:
+            with self.assertRaisesRegex(ValueError, "foreign-key violations"):
+                _import_sqlite_data(source_path, target, dry_run=True)
+            self.assertTrue(target.rolled_back)
+            self.assertTrue(target.test_cursor.closed)
+        finally:
+            os.remove(source_path)
+
+    def test_sqlite_backup_is_a_verified_snapshot_and_preserves_source(self):
+        source_fd, source_path = tempfile.mkstemp()
+        os.close(source_fd)
+        backup_dir = tempfile.mkdtemp()
+        try:
+            source = sqlite3.connect(source_path)
+            source.execute("CREATE TABLE preserved (value TEXT NOT NULL)")
+            source.execute("INSERT INTO preserved VALUES ('unchanged')")
+            source.commit()
+            source.close()
+
+            backup_path = _create_sqlite_backup(source_path, backup_dir)
+
+            self.assertTrue(os.path.isfile(backup_path))
+            backup = sqlite3.connect(backup_path)
+            self.assertEqual(backup.execute("PRAGMA quick_check").fetchone()[0], "ok")
+            self.assertEqual(
+                backup.execute("SELECT value FROM preserved").fetchone()[0],
+                "unchanged",
+            )
+            backup.close()
+            original = sqlite3.connect(source_path)
+            self.assertEqual(
+                original.execute("SELECT value FROM preserved").fetchone()[0],
+                "unchanged",
+            )
+            original.close()
+        finally:
+            for path in (source_path,):
+                if os.path.exists(path):
+                    os.remove(path)
+            for path in os.listdir(backup_dir):
+                os.remove(os.path.join(backup_dir, path))
+            os.rmdir(backup_dir)
 
     def test_postgresql_urls_require_tls_and_normalize_render_and_neon_schemes(self):
         pooled_url = _normalize_postgres_url("postgres://user:pass@neon-pooler.example/db")
