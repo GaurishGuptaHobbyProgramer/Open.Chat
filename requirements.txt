@@ -6,3 +6,4 @@ gunicorn
 eventlet
 python-dotenv
 psycopg2-binary
+psycopg[binary]
