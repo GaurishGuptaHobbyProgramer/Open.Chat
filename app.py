@@ -9,6 +9,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib import request as urllib_request
 
 import click
+import psycopg
+from psycopg.rows import dict_row
 try:
     from dotenv import load_dotenv
 except ImportError:  # pragma: no cover - optional dependency
@@ -19,7 +21,6 @@ from flask import Flask, g, current_app, has_app_context, jsonify, redirect, ren
 from flask_migrate import Migrate
 from flask_sqlalchemy import SQLAlchemy
 import psycopg2
-from psycopg2.extras import DictCursor
 from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
@@ -48,10 +49,28 @@ class PostgresCursor:
         return self._cursor.rowcount
 
     def fetchone(self):
-        return self._cursor.fetchone()
+        row = self._cursor.fetchone()
+        return self._wrap_row(row)
 
     def fetchall(self):
-        return self._cursor.fetchall()
+        return [self._wrap_row(row) for row in self._cursor.fetchall()]
+
+    def _wrap_row(self, row):
+        if row is None:
+            return None
+        columns = [column.name for column in self._cursor.description]
+        return PostgresRow(row, columns)
+
+
+class PostgresRow(dict):
+    def __init__(self, row, columns):
+        super().__init__(row)
+        self._values = tuple(row[column] for column in columns)
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._values[key]
+        return super().__getitem__(key)
 
 
 class PostgresConnection:
@@ -107,13 +126,13 @@ class PostgresConnection:
             statement += " RETURNING id"
 
         statement = statement.replace("?", "%s")
-        cursor = self._connection.cursor(cursor_factory=DictCursor)
+        cursor = self._connection.cursor(row_factory=dict_row)
         cursor.execute(statement, parameters or ())
         lastrowid = None
         if returns_id:
             row = cursor.fetchone()
             if row is not None:
-                lastrowid = row[0]
+                lastrowid = row["id"] if isinstance(row, dict) else row[0]
         return PostgresCursor(cursor, lastrowid)
 
     def commit(self):
@@ -127,7 +146,9 @@ class PostgresConnection:
 
 
 def _is_postgres_url(value):
-    return isinstance(value, str) and value.lower().startswith(("postgres://", "postgresql://", "postgresql+psycopg2://"))
+    return isinstance(value, str) and value.lower().startswith(
+        ("postgres://", "postgresql://", "postgresql+psycopg://", "postgresql+psycopg2://")
+    )
 
 
 def _normalize_postgres_url(value):
@@ -135,10 +156,9 @@ def _normalize_postgres_url(value):
     if not separator:
         raise ValueError("DATABASE_URL must be a PostgreSQL URL.")
 
-    normalized_scheme = "postgresql" if scheme.lower() in {"postgres", "postgresql+psycopg2"} else scheme
-    parts = urlsplit(normalized_scheme + "://" + remainder)
-    if parts.scheme != "postgresql":
+    if scheme.lower() not in {"postgres", "postgresql", "postgresql+psycopg", "postgresql+psycopg2"}:
         raise ValueError("DATABASE_URL must use PostgreSQL.")
+    parts = urlsplit("postgresql://" + remainder)
 
     query = parse_qsl(parts.query, keep_blank_values=True)
     sslmode = next((item_value.lower() for key, item_value in query if key.lower() == "sslmode"), None)
@@ -147,7 +167,7 @@ def _normalize_postgres_url(value):
     elif sslmode not in {"require", "verify-ca", "verify-full"}:
         raise ValueError("PostgreSQL connections must use TLS (sslmode=require or stronger).")
 
-    return urlunsplit(parts._replace(query=urlencode(query)))
+    return urlunsplit(parts._replace(scheme="postgresql+psycopg", query=urlencode(query)))
 
 
 def _sqlite_path(value):
@@ -555,7 +575,7 @@ def close_db(error):
         if error is not None:
             try:
                 db.rollback()
-            except (sqlite3.Error, psycopg2.Error):
+            except (sqlite3.Error, psycopg.Error, psycopg2.Error):
                 current_app.logger.exception("Could not roll back the database transaction")
         db.close()
 
@@ -1207,7 +1227,7 @@ def record_application_event(event_type, detail, endpoint=None, response_status=
             "DELETE FROM application_events WHERE id NOT IN (SELECT id FROM application_events ORDER BY id DESC LIMIT 1000)"
         )
         db.commit()
-    except (sqlite3.Error, psycopg2.Error):
+    except (sqlite3.Error, psycopg.Error, psycopg2.Error):
         if "db" in g:
             g.db.rollback()
         current_app.logger.exception("Could not record application event")
@@ -2932,7 +2952,7 @@ def create_app(test_config=None):
                         return redirect(url_for("home"))
                     except ValueError as exc:
                         form_error = str(exc)
-                    except (sqlite3.IntegrityError, psycopg2.IntegrityError) as exc:
+                    except (sqlite3.IntegrityError, psycopg.IntegrityError, psycopg2.IntegrityError) as exc:
                         current_app.logger.exception("Signup DB integrity failure for username=%s", username)
                         form_error = "This username is already taken."
                     except Exception as exc:
@@ -3577,7 +3597,7 @@ def create_app(test_config=None):
         elif app.config["DATABASE_BACKEND"] == "postgresql":
             try:
                 get_db().execute("SELECT 1").fetchone()
-            except (RuntimeError, psycopg2.Error) as exc:
+            except (RuntimeError, psycopg.Error, psycopg2.Error) as exc:
                 app.logger.exception("PostgreSQL connection check failed")
                 raise RuntimeError("Could not verify PostgreSQL connectivity during application startup.") from exc
 
@@ -3619,7 +3639,7 @@ def create_app(test_config=None):
             report = _import_sqlite_data(source_path, get_db()._connection, dry_run=dry_run)
         except (ValueError, sqlite3.Error) as exc:
             raise click.ClickException(str(exc)) from exc
-        except psycopg2.Error as exc:
+        except (psycopg.Error, psycopg2.Error) as exc:
             app.logger.exception("SQLite-to-PostgreSQL import failed; the target transaction was rolled back")
             raise click.ClickException(
                 "The import failed and the target transaction was rolled back. Check application logs."

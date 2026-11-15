@@ -38,6 +38,10 @@ from app import (
     ensure_enormous_space,
     migrate_legacy_messages,
     PostgresConnection,
+    PostgresCursor,
+    PostgresRow,
+    orm_db,
+    _is_postgres_url,
     _normalize_postgres_url,
     _import_sqlite_data,
     update_user_profile,
@@ -109,14 +113,59 @@ class ChatDatabaseTest(unittest.TestCase):
 
     def test_postgresql_urls_require_tls_and_normalize_render_and_neon_schemes(self):
         pooled_url = _normalize_postgres_url("postgres://user:pass@neon-pooler.example/db")
-        self.assertTrue(pooled_url.startswith("postgresql://"))
+        self.assertTrue(pooled_url.startswith("postgresql+psycopg://"))
+        self.assertTrue(_is_postgres_url(pooled_url))
         self.assertIn("sslmode=require", pooled_url)
+        psycopg_url = _normalize_postgres_url(
+            "postgresql+psycopg://user:pass@neon.example/db?sslmode=require"
+        )
+        self.assertTrue(psycopg_url.startswith("postgresql+psycopg://"))
+        self.assertTrue(_is_postgres_url(psycopg_url))
+        psycopg2_url = _normalize_postgres_url(
+            "postgresql+psycopg2://user:pass@neon.example/db?sslmode=require"
+        )
+        self.assertTrue(psycopg2_url.startswith("postgresql+psycopg://"))
         direct_url = _normalize_postgres_url(
             "postgresql://user:pass@neon.example/db?sslmode=verify-full"
         )
+        self.assertTrue(direct_url.startswith("postgresql+psycopg://"))
         self.assertIn("sslmode=verify-full", direct_url)
         with self.assertRaisesRegex(ValueError, "must use TLS"):
             _normalize_postgres_url("postgresql://user:pass@neon.example/db?sslmode=disable")
+
+    def test_postgres_row_supports_column_names_and_legacy_numeric_indexes(self):
+        row = PostgresRow({"id": 42, "username": "Ada"}, ["id", "username"])
+        self.assertEqual(row["id"], 42)
+        self.assertEqual(row[0], 42)
+        self.assertEqual(row[1], "Ada")
+
+    def test_postgres_cursor_wraps_psycopg3_dictionary_rows(self):
+        class FakeColumn:
+            def __init__(self, name):
+                self.name = name
+
+        class FakeCursor:
+            description = [FakeColumn("id"), FakeColumn("username")]
+
+            def fetchone(self):
+                return {"id": 42, "username": "Ada"}
+
+        row = PostgresCursor(FakeCursor()).fetchone()
+        self.assertEqual(row["username"], "Ada")
+        self.assertEqual(row[0], 42)
+
+    def test_flask_sqlalchemy_uses_psycopg3_for_render_postgres_urls(self):
+        with patch.dict(os.environ, {"APP_ENV": "development"}, clear=False):
+            with patch("app.get_db") as get_database:
+                get_database.return_value.execute.return_value.fetchone.return_value = (1,)
+                application = create_app({
+                    "APP_ENV": "development",
+                    "DATABASE_URL": "postgres://user:pass@localhost:5432/openchat",
+                })
+
+        self.assertTrue(application.config["SQLALCHEMY_DATABASE_URI"].startswith("postgresql+psycopg://"))
+        with application.app_context():
+            self.assertEqual(orm_db.engine.dialect.driver, "psycopg")
 
     def test_postgresql_sqlite_compatibility_rewrites_insert_operations(self):
         class FakeCursor:
@@ -131,14 +180,16 @@ class ChatDatabaseTest(unittest.TestCase):
                 self.parameters = parameters
 
             def fetchone(self):
-                return (42,)
+                return {"id": 42}
 
         class FakeConnection:
             def __init__(self):
                 self.last_cursor = None
+                self.row_factory = None
 
-            def cursor(self, cursor_factory=None):
+            def cursor(self, row_factory=None):
                 self.last_cursor = FakeCursor()
+                self.row_factory = row_factory
                 return self.last_cursor
 
         connection = FakeConnection()
@@ -148,6 +199,7 @@ class ChatDatabaseTest(unittest.TestCase):
             "(conversation_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)",
             (1, 7, "2026-01-01T00:00:00Z"),
         )
+        self.assertIsNotNone(connection.row_factory)
         self.assertIn("ON CONFLICT DO NOTHING RETURNING id", connection.last_cursor.statement)
         self.assertIn("%s", connection.last_cursor.statement)
         self.assertEqual(connection.last_cursor.parameters, (1, 7, "2026-01-01T00:00:00Z"))
