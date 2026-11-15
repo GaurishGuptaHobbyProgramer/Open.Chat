@@ -1,9 +1,7 @@
 Flask
-Flask-SocketIO
 Flask-Migrate
 Flask-SQLAlchemy
 gunicorn
-eventlet
 python-dotenv
 psycopg2-binary
 psycopg[binary]

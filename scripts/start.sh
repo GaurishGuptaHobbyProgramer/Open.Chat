@@ -14,4 +14,4 @@ if ! python -m flask --app app verify-schema; then
 fi
 
 echo "[startup] Starting Gunicorn."
-exec gunicorn --worker-class eventlet -w 1 wsgi:app
+exec gunicorn --worker-class gthread --workers 1 --threads 4 wsgi:app
