@@ -3,8 +3,10 @@
 ## Status and safety boundary
 
 Automatic database synchronization is **not implemented or enabled**. The
-application currently uses raw SQL across `app.py`; its checked-in Alembic
-baseline and local SQLite database contain 16 application tables, but there is
+application currently uses raw SQL across `app.py`; the initial Alembic
+baseline contains 16 application tables and the later developer-access
+revision adds two more. The local SQLite database currently contains the
+original 16 tables, but there is
 no change log, stable cross-database identity, conflict resolver, sync worker,
 or authenticated sync API. This document is a design proposal for review, not
 an operational procedure. No production database was accessed or changed.
@@ -134,10 +136,10 @@ counts—not event payloads or credentials.
 ## Current limitation
 
 The standalone one-time SQLite-to-PostgreSQL script preserves row IDs and
-password hashes, skips rows that conflict with existing primary or unique
-keys, and imports inside one PostgreSQL transaction. It validates both
-schemas, checks a consistent read-only SQLite snapshot, and supports a dry
-run. A real import requires a separately verified PostgreSQL backup. The
-older Flask importer remains empty-target-only. Neither tool synchronizes
-continuously, and database migration does not copy files under
-`static/uploads`.
+password hashes, reports identical rows already present, and aborts rather
+than hiding conflicting primary or unique keys. It creates a verified SQLite
+backup before a real import, validates schemas and relationships, and applies
+changes in one PostgreSQL transaction. It supports read-only dry-run and
+post-import verification modes. The Flask `import-sqlite` command delegates
+to the same importer; neither command is invoked automatically or synchronizes
+continuously. Database migration does not copy files under `static/uploads`.

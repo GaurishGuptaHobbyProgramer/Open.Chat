@@ -92,6 +92,65 @@ account IDs, so configure the same authorized ID(s) in Render after import.
 Do not grant admin access by changing password hashes or copying IDs from a
 different database.
 
+## Diagnosing sign-outs or apparently missing data
+
+Production startup refuses to run unless its configured backend is PostgreSQL.
+On Render, the platform's `RENDER=true` marker forces production mode even if
+`APP_ENV` is accidentally missing or overridden, so an absent PostgreSQL URL
+cannot silently select the ephemeral local `chat.db`.
+Application data access uses that selected backend; SQLite connections are
+limited to local development/tests and read-only migration source handling.
+The checked-in Render start script applies migrations, verifies the active
+schema, and starts one Gunicorn worker with four threads. Database writes for
+account creation and messages are explicitly committed. Connection failures
+raise errors; the application does not silently fall back to `chat.db`.
+
+At startup, Render logs a sanitized PostgreSQL identity: endpoint hostname,
+database name, current schema, search path, TLS status, and whether the active
+search path resolves the users and conversation-message tables. The hostname
+helps distinguish Neon endpoints/branches; the connection URL and password
+are not logged. To inspect the running Render environment without changing
+data, open the service Shell and run:
+
+```sh
+python -m flask --app app diagnose-database
+python -m flask --app app verify-schema
+```
+
+For a test account created in a controlled staging environment, the optional
+username reports only whether one account matched and its conversation
+membership and sent-message counts; it does not print the username:
+
+```sh
+python -m flask --app app diagnose-database --username "migration-check-user"
+```
+
+Record the database/schema/search-path fields and test-account counts, restart
+or redeploy the staging service, then run the same read-only diagnostics again.
+If the database identity differs, compare the effective Render `DATABASE_URL`
+and service/environment group without displaying or copying the URL. If the
+identity is the same but records are absent, investigate database history and
+application errors before attempting any recovery. Do not import, reset, stamp,
+or restore production data as part of diagnosis.
+
+Authentication uses Flask's signed, client-side cookie session; session state
+is not stored in a worker's memory or in PostgreSQL. Login marks the session
+permanent, using Flask's default 31-day inactivity lifetime. A process restart
+does not invalidate a cookie when the same `SECRET_KEY` is configured, while
+changing that key invalidates existing cookies without deleting accounts or
+messages. Keep the Render `SECRET_KEY` stable across deploys and all service
+instances. In production, cookies are explicitly `Secure`, `HttpOnly`, and
+`SameSite=Lax`; no fixed cookie domain is set, so keep users on one canonical
+HTTPS hostname. A lost session should require a new sign-in, not make persisted
+account data disappear.
+
+For a safe persistence/session reproduction, create a disposable test account
+and conversation in staging, then use the read-only diagnostic above before
+and after a controlled restart. Confirm the browser remains on the same HTTPS
+hostname and that the session cookie is present with `Secure`, `HttpOnly`, and
+`SameSite=Lax`. Do not use a production account or destructive operation for
+this test.
+
 For a legacy database that already has the complete baseline schema but no
 Alembic version table, inspect and compare every table, column, constraint, and
 index first. Only then mark the exact baseline as applied:
@@ -109,20 +168,30 @@ blindly.
 
 Use the standalone
 [`scripts/migrate_sqlite_to_postgres.py`](./scripts/migrate_sqlite_to_postgres.py)
-for a manual, repeatable merge into PostgreSQL. It preserves IDs and source
-values, skips primary-key and other unique-key conflicts, validates source and
-destination schemas, uses a consistent read-only SQLite snapshot, and applies
-all inserts in one transaction. A failed or interrupted run rolls back and can
-be retried. PostgreSQL sequences are advanced after explicit IDs are inserted.
+for a manual, repeatable merge into PostgreSQL. It creates and verifies a
+SQLite backup before a real run, reads from that backup, preserves IDs and
+password hashes, checks source and destination schemas/relationships, and
+reports per-table counts, identical duplicates, and conflicts. Identical
+records are left unchanged. Any changed primary-key or unique-key collision
+aborts the complete import transaction without writing rows; conflicts are
+never hidden as generic skips. PostgreSQL sequence synchronization uses
+transactional `ALTER SEQUENCE ... RESTART`.
 
-Before each real run, make and verify a PostgreSQL backup. Set `DATABASE_URL`
-in the current shell without storing or logging the credential. Run
-`python scripts\migrate_sqlite_to_postgres.py --dry-run` first, review the
-per-table preview, then execute without `--dry-run`. Full instructions and
-report interpretation are in [`scripts/README.md`](./scripts/README.md).
-The older `flask --app app import-sqlite` command remains empty-target-only;
-it must not be used to merge into populated PostgreSQL. No deployment command
-automatically invokes either importer.
+The dry run performs read-only validation and reports prospective insertions
+without changing the destination. After manually approving the preview and
+verifying a PostgreSQL backup, run the command without `--dry-run`. A later
+run imports only genuinely new rows. Use `--verify` to check that every source
+row is present with the same values and that destination relationships are
+intact. PowerShell setup, dry-run, migration, and verification commands are in
+[`scripts/README.md`](./scripts/README.md). No deployment command invokes the
+importer.
+
+Destination-only tables and columns with safe defaults are retained. The
+importer refuses unsupported source tables/columns instead of silently
+discarding them; any such older schema requires a separately reviewed
+additive schema migration. The optional `flask --app app import-sqlite`
+command delegates to the same importer and conflict policy; neither command
+is invoked automatically.
 
 The transfer includes database rows and attachment metadata, not file bytes
 under `static/uploads`. A separate verified file transfer may be needed.

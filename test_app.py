@@ -102,8 +102,8 @@ class ChatDatabaseTest(unittest.TestCase):
             _REQUIRED_SCHEMA_INDEXES,
             _REQUIRED_SCHEMA_KEY_CONSTRAINTS,
             _REQUIRED_SCHEMA_FOREIGN_KEYS,
-            {"20261115_01"},
-            {"20261115_01"},
+            {"20261115_02"},
+            {"20261115_02"},
         )
         self.assertEqual(_schema_validation_errors(*complete_args), [])
 
@@ -313,7 +313,14 @@ class ChatDatabaseTest(unittest.TestCase):
     def test_flask_sqlalchemy_uses_psycopg3_for_render_postgres_urls(self):
         with patch.dict(os.environ, {"APP_ENV": "development"}, clear=False):
             with patch("app.get_db") as get_database:
-                get_database.return_value.execute.return_value.fetchone.return_value = (1,)
+                get_database.return_value.execute.return_value.fetchone.return_value = {
+                    "database_name": "openchat",
+                    "schema_name": "public",
+                    "search_path": "public",
+                    "tls_enabled": True,
+                    "users_table_present": True,
+                    "messages_table_present": True,
+                }
                 application = create_app({
                     "APP_ENV": "development",
                     "DATABASE_URL": "postgres://user:pass@localhost:5432/openchat",
@@ -604,15 +611,45 @@ class ChatDatabaseTest(unittest.TestCase):
                 "INSERT INTO users (username, email, password_hash, created_at, email_verified) VALUES (?, ?, ?, ?, ?)",
                 ("Akshay", "akshay@example.com", "hash1", "2024-01-01T00:00:00Z", 0),
             )
+            conn.execute(
+                "INSERT INTO users (id, username, email, password_hash, created_at, "
+                "email_verified, otp_code, otp_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    12,
+                    "Second User",
+                    "second@example.com",
+                    "hash2",
+                    "2024-02-01T00:00:00Z",
+                    1,
+                    "123456",
+                    "2024-02-01T00:10:00Z",
+                ),
+            )
             conn.commit()
             conn.close()
 
             app = create_app({"TESTING": True, "DATABASE": legacy_db_path})
             with app.app_context():
                 db = get_db()
-                row = db.execute("SELECT username, password_hash FROM users ORDER BY id").fetchone()
-                self.assertEqual(row[0], "1, Akshay")
-                self.assertEqual(row[1], "hash1")
+                rows = db.execute(
+                    "SELECT id, username, password_hash, email, email_verified, otp_code, "
+                    "otp_expires_at FROM users ORDER BY id"
+                ).fetchall()
+                self.assertEqual(
+                    [tuple(row) for row in rows],
+                    [
+                        (1, "1, Akshay", "hash1", "akshay@example.com", 0, None, None),
+                        (
+                            12,
+                            "12, Second User",
+                            "hash2",
+                            "second@example.com",
+                            1,
+                            "123456",
+                            "2024-02-01T00:10:00Z",
+                        ),
+                    ],
+                )
         finally:
             if os.path.exists(legacy_db_path):
                 os.remove(legacy_db_path)
@@ -1505,6 +1542,167 @@ class DeveloperControlCenterTest(unittest.TestCase):
         self.assertTrue(records[self.developer["id"]]["is_developer"])
         self.assertTrue(records[self.bob["id"]]["is_developer"])
         self.assertFalse(records[self.alice["id"]]["is_developer"])
+
+    def test_phone_verified_setup_grants_developer_access_only_after_correct_code(self):
+        self.app.config.update({
+            "OPENCHAT_DEVELOPER_OTP_PHONE": "+15551234567",
+            "TWILIO_ACCOUNT_SID": "ACtest",
+            "TWILIO_AUTH_TOKEN": "test-token",
+            "TWILIO_FROM_NUMBER": "+15005550006",
+        })
+        client = self.app.test_client()
+        self.assertEqual(client.get("/developer-setup").status_code, 200)
+        with client.session_transaction() as session:
+            csrf_token = session["developer_setup_csrf"]
+
+        with patch("app._send_developer_otp") as send_otp:
+            response = client.post(
+                "/developer-setup",
+                data={
+                    "csrf_token": csrf_token,
+                    "username": "Verified Developer",
+                    "password": "DeveloperPass123!",
+                    "confirm_password": "DeveloperPass123!",
+                },
+            )
+        self.assertEqual(response.status_code, 302)
+        send_otp.assert_called_once()
+        otp = send_otp.call_args.args[0]
+
+        other_client = self.app.test_client()
+        other_client.get("/developer-setup")
+        with other_client.session_transaction() as session:
+            other_csrf = session["developer_setup_csrf"]
+        with patch("app._send_developer_otp") as second_send:
+            rate_limited = other_client.post(
+                "/developer-setup",
+                data={
+                    "csrf_token": other_csrf,
+                    "username": "Another Developer",
+                    "password": "OtherPassword123!",
+                    "confirm_password": "OtherPassword123!",
+                },
+            )
+        self.assertEqual(rate_limited.status_code, 429)
+        second_send.assert_not_called()
+
+        with client.session_transaction() as session:
+            csrf_token = session["developer_setup_csrf"]
+            challenge_id = session["developer_signup_challenge_id"]
+        rejected = client.post(
+            "/developer-setup/verify",
+            data={"csrf_token": csrf_token, "otp": "not-a-code"},
+        )
+        self.assertEqual(rejected.status_code, 400)
+        with self.app.app_context():
+            self.assertEqual(
+                get_db().execute(
+                    "SELECT COUNT(*) FROM users WHERE username LIKE '%, Verified Developer'"
+                ).fetchone()[0],
+                0,
+            )
+
+        verified = client.post(
+            "/developer-setup/verify",
+            data={"csrf_token": csrf_token, "otp": otp},
+        )
+        self.assertEqual(verified.status_code, 302)
+        self.assertEqual(verified.headers["Location"], "/developer")
+        self.assertEqual(client.get("/developer").status_code, 200)
+        with client.session_transaction() as session:
+            session["developer_signup_challenge_id"] = challenge_id
+            session["developer_setup_csrf"] = csrf_token
+        replayed = client.post(
+            "/developer-setup/verify",
+            data={"csrf_token": csrf_token, "otp": otp},
+        )
+        self.assertEqual(replayed.status_code, 302)
+        self.assertEqual(replayed.headers["Location"], "/developer-setup")
+        with client.session_transaction() as session:
+            developer_id = session["user_id"]
+        with self.app.app_context():
+            developer = get_db().execute(
+                "SELECT user_id FROM developer_accounts WHERE user_id = ?",
+                (developer_id,),
+            ).fetchone()
+            self.assertIsNotNone(developer)
+            self.assertEqual(
+                get_db().execute("SELECT COUNT(*) FROM developer_accounts").fetchone()[0],
+                1,
+            )
+
+    def test_developer_setup_requires_csrf_and_configured_sms_delivery(self):
+        client = self.app.test_client()
+        self.assertEqual(client.get("/developer-setup").status_code, 200)
+        with client.session_transaction() as session:
+            csrf_token = session["developer_setup_csrf"]
+
+        bad_csrf = client.post(
+            "/developer-setup",
+            data={
+                "csrf_token": "incorrect",
+                "username": "Unverified",
+                "password": "DeveloperPass123!",
+                "confirm_password": "DeveloperPass123!",
+            },
+        )
+        self.assertEqual(bad_csrf.status_code, 400)
+
+        unconfigured = client.post(
+            "/developer-setup",
+            data={
+                "csrf_token": csrf_token,
+                "username": "Unverified",
+                "password": "DeveloperPass123!",
+                "confirm_password": "DeveloperPass123!",
+            },
+        )
+        self.assertEqual(unconfigured.status_code, 503)
+        self.assertEqual(client.get("/developer").status_code, 302)
+
+    def test_developer_setup_expires_a_challenge_after_five_incorrect_codes(self):
+        self.app.config.update({
+            "OPENCHAT_DEVELOPER_OTP_PHONE": "+15551234567",
+            "TWILIO_ACCOUNT_SID": "ACtest",
+            "TWILIO_AUTH_TOKEN": "test-token",
+            "TWILIO_FROM_NUMBER": "+15005550006",
+        })
+        client = self.app.test_client()
+        client.get("/developer-setup")
+        with client.session_transaction() as session:
+            csrf_token = session["developer_setup_csrf"]
+        with patch("app._send_developer_otp") as send_otp:
+            sent = client.post(
+                "/developer-setup",
+                data={
+                    "csrf_token": csrf_token,
+                    "username": "Attempt Limit",
+                    "password": "OtherPassword123!",
+                    "confirm_password": "OtherPassword123!",
+                },
+            )
+        self.assertEqual(sent.status_code, 302)
+        wrong_code = "000000" if send_otp.call_args.args[0] != "000000" else "000001"
+
+        for attempt in range(5):
+            response = client.post(
+                "/developer-setup/verify",
+                data={"csrf_token": csrf_token, "otp": wrong_code},
+            )
+            self.assertEqual(response.status_code, 429 if attempt == 4 else 400)
+        with self.app.app_context():
+            self.assertEqual(
+                get_db().execute(
+                    "SELECT COUNT(*) FROM developer_signup_challenges"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                get_db().execute(
+                    "SELECT COUNT(*) FROM users WHERE username LIKE '%, Attempt Limit'"
+                ).fetchone()[0],
+                0,
+            )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Developer account setup | Open.Chat</title>
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="auth-shell">
+        <main class="auth-card">
+            <div class="auth-header">
+                <div class="brand-copy">
+                    <div class="brand-name">Open.Chat</div>
+                    <div class="brand-tagline">Developer account setup</div>
+                </div>
+                <a href="{{ url_for('auth_page', mode='login') }}" class="secondary-link">Back to login</a>
+            </div>
+
+            <h1>{% if pending %}Verify your request{% else %}Create a developer account{% endif %}</h1>
+            <p>
+                {% if pending %}
+                Enter the six-digit verification code sent to the site owner’s phone. The code expires in 10 minutes.
+                {% else %}
+                A verification code will be sent to the site owner. Developer access is granted only after that code is verified.
+                {% endif %}
+            </p>
+
+            {% if error %}
+            <div class="form-message error-message" role="alert">{{ error }}</div>
+            {% endif %}
+
+            {% if pending %}
+            <form method="post" action="{{ url_for('verify_developer_setup') }}" class="auth-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <label>
+                    <span>Verification code</span>
+                    <input type="text" name="otp" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required>
+                </label>
+                <button type="submit" class="primary-button">Verify and create account</button>
+            </form>
+            <form method="post" action="{{ url_for('cancel_developer_setup') }}" class="auth-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="secondary-link">Cancel this setup</button>
+            </form>
+            {% else %}
+            <form method="post" action="{{ url_for('developer_setup') }}" class="auth-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <label>
+                    <span>Display name</span>
+                    <input type="text" name="username" maxlength="30" minlength="2" placeholder="Enter your name" required>
+                </label>
+                <label>
+                    <span>Password</span>
+                    <input type="password" name="password" minlength="8" placeholder="At least 8 characters" required>
+                </label>
+                <label>
+                    <span>Confirm password</span>
+                    <input type="password" name="confirm_password" minlength="8" placeholder="Re-enter your password" required>
+                </label>
+                <button type="submit" class="primary-button" {% if not sms_configured %}disabled{% endif %}>Send owner verification code</button>
+            </form>
+            {% if not error %}
+                {% if not database_ready %}
+            <p class="form-message error-message" role="status">Database migrations must be applied before developer accounts can be created.</p>
+                {% elif not sms_configured %}
+            <p class="form-message error-message" role="status">Phone verification is not configured on this server yet.</p>
+                {% endif %}
+            {% endif %}
+            {% endif %}
+        </main>
+    </div>
+</body>
+</html>

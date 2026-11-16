@@ -28,6 +28,23 @@ Production must set:
 - `SECRET_KEY` to a stable, secret value. Render generates one in `render.yaml`;
   do not rotate it casually because it invalidates existing sessions.
 
+Production refuses to start without a PostgreSQL `DATABASE_URL`; Render's
+`RENDER=true` marker enforces production mode even if `APP_ENV` is misconfigured,
+so it cannot silently fall back to local SQLite. Startup logs the sanitized
+active endpoint/database/schema, search path, TLS status, and presence of the
+principal tables. Use
+`python -m flask --app app diagnose-database` in the Render Shell to repeat
+these read-only checks and optionally compare a staging account's persisted
+conversation and message counts. See
+[DATABASE_MIGRATION.md](./DATABASE_MIGRATION.md#diagnosing-sign-outs-or-apparently-missing-data)
+for the persistence and session diagnostic procedure.
+
+Authentication uses signed client-side cookies, not worker memory or database
+session rows. The configured `SECRET_KEY` must remain identical across restarts
+and instances. Production cookies are Secure, HttpOnly, and SameSite=Lax. A
+session invalidation requires a sign-in but does not delete the user's database
+records.
+
 Never commit a real connection URL or secret. `.env` is ignored by Git.
 
 ## Schema migrations
@@ -76,19 +93,19 @@ changes. Never stamp a database whose schema has not been checked.
 
 ## Copying SQLite data to PostgreSQL
 
-For a manual, repeatable merge that skips existing keys without overwriting
-PostgreSQL, use the standalone
+For a manual, repeatable merge that skips identical existing records and
+aborts on conflicting keys without overwriting PostgreSQL, use the standalone
 [`scripts/migrate_sqlite_to_postgres.py`](./scripts/migrate_sqlite_to_postgres.py).
 It validates both schemas and the SQLite source, reads a consistent
 read-only snapshot, migrates tables in foreign-key order inside one PostgreSQL
-transaction, and advances sequences after explicit IDs are inserted. Use its
-`--dry-run` option first and back up PostgreSQL before every real run. Setup,
-commands, and report details are in [`scripts/README.md`](./scripts/README.md).
+transaction, creates and verifies a source backup before a real run, and
+synchronizes PostgreSQL sequences transactionally. Use its `--dry-run` option
+first and back up PostgreSQL before every real run. Setup, commands, and report
+details are in [`scripts/README.md`](./scripts/README.md).
 
-The older `flask --app app import-sqlite` command is intentionally stricter:
-it refuses non-empty target tables and is not the merge workflow. Do not use
-it to merge into an existing production database. Neither command performs
-automatic synchronization or backs up PostgreSQL.
+The `flask --app app import-sqlite` command delegates to the same importer and
+conflict policy. Neither command performs automatic synchronization. Back up
+PostgreSQL separately before any approved real import.
 
 Both tools transfer database rows only. Attachment metadata may refer to bytes
 stored under `static/uploads`; transfer those files separately if their links

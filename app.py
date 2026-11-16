@@ -1,6 +1,10 @@
+import base64
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -173,6 +177,36 @@ def _normalize_postgres_url(value):
     return urlunsplit(parts._replace(scheme="postgresql+psycopg", query=urlencode(query)))
 
 
+def _postgres_endpoint_host(value):
+    return urlsplit(value).hostname
+
+
+def _postgres_database_identity(connection):
+    row = connection.execute(
+        """
+        SELECT current_database() AS database_name,
+               current_schema() AS schema_name,
+               current_setting('search_path') AS search_path,
+               COALESCE(
+                   (SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()),
+                   false
+               ) AS tls_enabled,
+               to_regclass('users') IS NOT NULL AS users_table_present,
+               to_regclass('conversation_messages') IS NOT NULL AS messages_table_present
+        """
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("Could not identify the configured PostgreSQL database.")
+    return {
+        "database_name": row["database_name"],
+        "schema_name": row["schema_name"],
+        "search_path": row["search_path"],
+        "tls_enabled": row["tls_enabled"],
+        "users_table_present": row["users_table_present"],
+        "messages_table_present": row["messages_table_present"],
+    }
+
+
 def _sqlite_path(value):
     if value in {None, "", "chat.db"}:
         return os.path.join(_project_root, "chat.db")
@@ -185,6 +219,8 @@ def _sqlite_path(value):
 
 _SQLITE_IMPORT_TABLES = (
     "users",
+    "developer_accounts",
+    "developer_signup_challenges",
     "messages",
     "presence",
     "user_settings",
@@ -204,6 +240,11 @@ _SQLITE_IMPORT_TABLES = (
 
 _REQUIRED_SCHEMA_COLUMNS = {
     "users": {"id", "username", "password_hash", "created_at", "is_suspended", "suspended_at", "suspended_by"},
+    "developer_accounts": {"user_id", "created_at"},
+    "developer_signup_challenges": {
+        "id", "challenge_id", "username", "password_hash", "otp_hash",
+        "expires_at", "attempts", "created_at",
+    },
     "messages": {"id", "username", "message", "created_at", "attachment_name", "attachment_type", "attachment_url", "attachment_size"},
     "presence": {"id", "token", "created_at"},
     "user_settings": {"user_id", "name", "personality", "greeting"},
@@ -234,6 +275,9 @@ _REQUIRED_SCHEMA_INDEXES = {
 
 _REQUIRED_SCHEMA_KEY_CONSTRAINTS = {
     ("users", "PRIMARY KEY", ("id",)),
+    ("developer_accounts", "PRIMARY KEY", ("user_id",)),
+    ("developer_signup_challenges", "PRIMARY KEY", ("id",)),
+    ("developer_signup_challenges", "UNIQUE", ("challenge_id",)),
     ("messages", "PRIMARY KEY", ("id",)),
     ("presence", "PRIMARY KEY", ("id",)),
     ("user_settings", "PRIMARY KEY", ("user_id",)),
@@ -255,6 +299,7 @@ _REQUIRED_SCHEMA_KEY_CONSTRAINTS = {
 }
 
 _REQUIRED_SCHEMA_FOREIGN_KEYS = {
+    ("developer_accounts", "user_id", "users", "id", "CASCADE"),
     ("user_settings", "user_id", "users", "id", "CASCADE"),
     ("user_profiles", "user_id", "users", "id", "CASCADE"),
     ("user_statuses", "user_id", "users", "id", "CASCADE"),
@@ -294,6 +339,8 @@ _SQLITE_IMPORT_ID_TABLES = {
 
 _SQLITE_IMPORT_UNIQUE_KEYS = {
     "users": (("id",),),
+    "developer_accounts": (("user_id",),),
+    "developer_signup_challenges": (("id",), ("challenge_id",)),
     "messages": (("id",),),
     "presence": (("id",), ("token",)),
     "user_settings": (("user_id",),),
@@ -552,6 +599,7 @@ def _create_sqlite_backup(source_path, backup_directory=None):
 
 def _import_sqlite_data(source_path, target_connection, dry_run=False):
     source = sqlite3.connect(_sqlite_read_only_uri(source_path), uri=True)
+    source.row_factory = sqlite3.Row
     target_cursor = None
     report = {
         "dry_run": dry_run,
@@ -814,33 +862,24 @@ def init_db():
     if user_table_exists:
         user_columns = {row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()}
         if "email" in user_columns or "email_verified" in user_columns or "otp_code" in user_columns:
+            email_column = ", email" if "email" in user_columns else ""
             legacy_rows = db.execute(
-                "SELECT id, username, email, password_hash, created_at FROM users ORDER BY id"
+                f"SELECT id, username{email_column} FROM users ORDER BY id"
             ).fetchall()
-            db.execute("ALTER TABLE users RENAME TO users_legacy")
-            db.execute(
-                """
-                CREATE TABLE users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    username TEXT NOT NULL,
-                    password_hash TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                )
-                """
-            )
-
             for row in legacy_rows:
-                base_name = (row["username"] or row["email"] or "User").strip()
+                base_name = (
+                    row["username"]
+                    or (row["email"] if "email" in user_columns else None)
+                    or "User"
+                ).strip()
                 if not base_name:
                     base_name = "User"
                 if len(base_name) < 2:
                     base_name = f"User {row['id']}"
                 db.execute(
-                    "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-                    (f"{row['id']}, {base_name}", row["password_hash"], row["created_at"]),
+                    "UPDATE users SET username = ? WHERE id = ?",
+                    (f"{row['id']}, {base_name}", row["id"]),
                 )
-
-            db.execute("DROP TABLE users_legacy")
     else:
         db.execute(
             """
@@ -853,9 +892,6 @@ def init_db():
             """
         )
 
-    for index_row in db.execute("PRAGMA index_list('users')").fetchall():
-        db.execute(f"DROP INDEX IF EXISTS {index_row['name']}")
-
     db.execute("UPDATE users SET username = TRIM(username) WHERE username IS NOT NULL")
     user_columns = {row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()}
     if "is_suspended" not in user_columns:
@@ -864,6 +900,29 @@ def init_db():
         db.execute("ALTER TABLE users ADD COLUMN suspended_at TEXT")
     if "suspended_by" not in user_columns:
         db.execute("ALTER TABLE users ADD COLUMN suspended_by INTEGER")
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS developer_accounts (
+            user_id INTEGER PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS developer_signup_challenges (
+            id INTEGER PRIMARY KEY,
+            challenge_id TEXT NOT NULL UNIQUE,
+            username TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            otp_hash TEXT NOT NULL,
+            expires_at INTEGER NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
     db.commit()
 
 
@@ -1531,12 +1590,30 @@ def record_application_event(event_type, detail, endpoint=None, response_status=
         current_app.logger.exception("Could not record application event")
 
 
+def _developer_account_schema_ready():
+    db = get_db()
+    if current_app.config["DATABASE_BACKEND"] == "postgresql":
+        row = db.execute(
+            "SELECT COUNT(*) FROM information_schema.tables "
+            "WHERE table_schema = current_schema() "
+            "AND table_name IN (?, ?, ?)",
+            ("developer_accounts", "developer_signup_challenges", "application_events"),
+        ).fetchone()
+    else:
+        row = db.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type = 'table' AND name IN (?, ?, ?)",
+            ("developer_accounts", "developer_signup_challenges", "application_events"),
+        ).fetchone()
+    return row[0] == 3
+
+
 def get_configured_developer_user_ids():
     configured_ids = current_app.config.get("OPENCHAT_DEVELOPER_USER_ID")
     if isinstance(configured_ids, int):
         configured_ids = str(configured_ids)
     if not isinstance(configured_ids, str):
-        return set()
+        configured_ids = ""
 
     developer_ids = set()
     for configured_id in configured_ids.split(","):
@@ -1546,6 +1623,11 @@ def get_configured_developer_user_ids():
             continue
         if developer_id > 0:
             developer_ids.add(developer_id)
+    if _developer_account_schema_ready():
+        developer_ids.update(
+            row["user_id"]
+            for row in get_db().execute("SELECT user_id FROM developer_accounts").fetchall()
+        )
     return developer_ids
 
 
@@ -1554,7 +1636,9 @@ def is_developer_user(user=None):
     return active_user is not None and active_user["id"] in get_configured_developer_user_ids()
 
 
-def serialize_developer_user(row):
+def serialize_developer_user(row, developer_user_ids=None):
+    if developer_user_ids is None:
+        developer_user_ids = get_configured_developer_user_ids()
     return {
         "id": row["id"],
         "username": row["username"],
@@ -1565,7 +1649,7 @@ def serialize_developer_user(row):
         "is_suspended": bool(row["is_suspended"]),
         "last_activity": "Not Tracked",
         "online_status": "Not Tracked",
-        "is_developer": row["id"] in get_configured_developer_user_ids(),
+        "is_developer": row["id"] in developer_user_ids,
     }
 
 
@@ -2073,18 +2157,17 @@ def build_serial_username(display_name, db=None):
     return f"{serial_number}, {clean_name}"
 
 
-def register_user(username, password):
+def _register_user_with_password_hash(username, password_hash, is_developer=False):
     clean_name = (username or "").strip()
     if len(clean_name) < 2:
         raise ValueError("Name must be at least 2 characters long.")
     if len(clean_name) > 30:
         raise ValueError("Name must be 30 characters or fewer.")
-    if len(password or "") < 8:
-        raise ValueError("Password must be at least 8 characters long.")
+    if not password_hash:
+        raise ValueError("A password hash is required.")
 
     db = get_db()
     generated_username = build_serial_username(clean_name, db)
-    password_hash = generate_password_hash(password)
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     try:
@@ -2092,6 +2175,11 @@ def register_user(username, password):
             "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
             (generated_username, password_hash, timestamp),
         )
+        if is_developer:
+            db.execute(
+                "INSERT INTO developer_accounts (user_id, created_at) VALUES (?, ?)",
+                (cursor.lastrowid, timestamp),
+            )
         user = db.execute(
             "SELECT id, username, created_at FROM users WHERE id = ?",
             (cursor.lastrowid,),
@@ -2119,6 +2207,71 @@ def register_user(username, password):
         "username": user["username"],
         "created_at": user["created_at"],
     }
+
+
+def register_user(username, password, is_developer=False):
+    if len(password or "") < 8:
+        raise ValueError("Password must be at least 8 characters long.")
+    return _register_user_with_password_hash(
+        username,
+        generate_password_hash(password),
+        is_developer=is_developer,
+    )
+
+
+def _developer_otp_delivery_configured():
+    required = (
+        current_app.config.get("OPENCHAT_DEVELOPER_OTP_PHONE"),
+        current_app.config.get("TWILIO_ACCOUNT_SID"),
+        current_app.config.get("TWILIO_AUTH_TOKEN"),
+        current_app.config.get("TWILIO_FROM_NUMBER"),
+    )
+    return all(required) and all(
+        re.fullmatch(r"\+[1-9]\d{7,14}", number or "")
+        for number in (required[0], required[3])
+    )
+
+
+def _send_developer_otp(code):
+    account_sid = current_app.config["TWILIO_ACCOUNT_SID"]
+    auth_token = current_app.config["TWILIO_AUTH_TOKEN"]
+    body = urlencode({
+        "To": current_app.config["OPENCHAT_DEVELOPER_OTP_PHONE"],
+        "From": current_app.config["TWILIO_FROM_NUMBER"],
+        "Body": f"Open.Chat developer account verification code: {code}. It expires in 10 minutes. Do not share it.",
+    }).encode("utf-8")
+    credentials = base64.b64encode(f"{account_sid}:{auth_token}".encode("utf-8")).decode("ascii")
+    twilio_url = (
+        "https://api.twilio.com/2010-04-01/Accounts/"
+        + quote(account_sid, safe="")
+        + "/Messages.json"
+    )
+    twilio_request = urllib_request.Request(
+        twilio_url,
+        data=body,
+        headers={
+            "Authorization": "Basic " + credentials,
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        method="POST",
+    )
+    with urllib_request.urlopen(twilio_request, timeout=10) as response:
+        if response.status not in {200, 201}:
+            raise RuntimeError(f"Twilio rejected the OTP request with HTTP {response.status}.")
+
+
+def _developer_otp_digest(challenge_id, code):
+    secret_key = current_app.config["SECRET_KEY"]
+    if isinstance(secret_key, str):
+        secret_key = secret_key.encode("utf-8")
+    message = f"{challenge_id}:{code}".encode("utf-8")
+    return hmac.new(secret_key, message, hashlib.sha256).hexdigest()
+
+
+def _developer_setup_csrf_valid():
+    expected = session.get("developer_setup_csrf")
+    supplied = request.form.get("csrf_token", "")
+    return bool(expected and supplied and hmac.compare_digest(str(expected), supplied))
 
 
 def authenticate_user(username, password):
@@ -2855,7 +3008,10 @@ def remove_presence(token):
 
 def create_app(test_config=None):
     app = Flask(__name__)
+    is_render_runtime = os.getenv("RENDER", "").strip().lower() == "true"
     app_environment = (os.getenv("APP_ENV") or os.getenv("FLASK_ENV") or "development").strip().lower()
+    if is_render_runtime:
+        app_environment = "production"
     debug_enabled = str(os.getenv("FLASK_DEBUG", "false")).strip().lower() in {"1", "true", "yes", "on"}
     configured_secret = os.getenv("SECRET_KEY")
     test_config_secret = test_config.get("SECRET_KEY") if isinstance(test_config, dict) else None
@@ -2870,15 +3026,27 @@ def create_app(test_config=None):
         SECRET_KEY=configured_secret or test_config_secret or "openchat-local-development-only",
         APP_ENV=app_environment,
         DEBUG=debug_enabled and app_environment not in {"production", "prod"},
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
         DATABASE_URL=configured_database_url,
         DATABASE=configured_database_url,
         UPLOAD_FOLDER=os.path.join(app.root_path, "static", "uploads"),
         OPENCHAT_DEVELOPER_USER_ID=os.getenv("OPENCHAT_DEVELOPER_USER_ID", ""),
+        OPENCHAT_DEVELOPER_OTP_PHONE=os.getenv("OPENCHAT_DEVELOPER_OTP_PHONE", ""),
+        TWILIO_ACCOUNT_SID=os.getenv("TWILIO_ACCOUNT_SID", ""),
+        TWILIO_AUTH_TOKEN=os.getenv("TWILIO_AUTH_TOKEN", ""),
+        TWILIO_FROM_NUMBER=os.getenv("TWILIO_FROM_NUMBER", ""),
         OPENCHAT_AI_ENABLED=str(os.getenv("OPENCHAT_AI_ENABLED", "false")).strip().lower() not in {"0", "false", "no", "off", ""},
     )
 
     if test_config is not None:
         app.config.update(test_config)
+    if is_render_runtime:
+        app.config["APP_ENV"] = "production"
+        app.config["DEBUG"] = False
+    app.config["SESSION_COOKIE_SECURE"] = (
+        str(app.config.get("APP_ENV", "")).strip().lower() in {"production", "prod"}
+    )
 
     database_url = app.config.get("DATABASE_URL", app.config.get("DATABASE"))
     if isinstance(test_config, dict) and "DATABASE" in test_config and "DATABASE_URL" not in test_config:
@@ -2907,7 +3075,8 @@ def create_app(test_config=None):
             "connect_args": {"connect_timeout": 5},
         }
 
-    if app.config.get("APP_ENV") in {"production", "prod"} and not app.config.get("TESTING"):
+    production_runtime = app.config.get("APP_ENV") in {"production", "prod"}
+    if production_runtime and (not app.config.get("TESTING") or is_render_runtime):
         if app.config["DATABASE_BACKEND"] != "postgresql":
             raise RuntimeError("DATABASE_URL must be a PostgreSQL connection URL in production.")
 
@@ -2918,7 +3087,7 @@ def create_app(test_config=None):
     if app.config.get("APP_ENV") in {"production", "prod"}:
         app.config["DEBUG"] = False
 
-    if app.config.get("APP_ENV") in {"production", "prod"} and not (configured_secret or test_config_secret):
+    if production_runtime and not (configured_secret or test_config_secret):
         raise RuntimeError("SECRET_KEY must be configured in production.")
 
     app.teardown_appcontext(close_db)
@@ -2998,6 +3167,249 @@ def create_app(test_config=None):
             ad_network_status=get_ad_network_status(),
         )
 
+    @app.route("/developer-setup", methods=["GET", "POST"])
+    def developer_setup():
+        csrf_token = session.setdefault("developer_setup_csrf", secrets.token_urlsafe(32))
+        challenge_id = session.get("developer_signup_challenge_id")
+        schema_ready = _developer_account_schema_ready()
+        pending = None
+        if challenge_id and schema_ready:
+            db = get_db()
+            pending = db.execute(
+                "SELECT expires_at FROM developer_signup_challenges "
+                "WHERE id = ? AND challenge_id = ?",
+                (1, challenge_id),
+            ).fetchone()
+            if pending and int(datetime.now(timezone.utc).timestamp()) >= pending["expires_at"]:
+                db.execute(
+                    "DELETE FROM developer_signup_challenges WHERE id = ? AND challenge_id = ?",
+                    (1, challenge_id),
+                )
+                db.commit()
+                session.pop("developer_signup_challenge_id", None)
+                pending = None
+
+        error = None
+        response_status = 200
+        if not schema_ready:
+            error = "Developer setup is unavailable until the database migrations are applied."
+            if request.method == "POST":
+                response_status = 503
+        elif request.method == "POST":
+            if not _developer_setup_csrf_valid():
+                error = "This setup request could not be verified. Reload the page and try again."
+                response_status = 400
+            elif pending:
+                error = "A verification code has already been sent for this setup. Enter it below."
+            else:
+                username = (request.form.get("username") or "").strip()
+                password = request.form.get("password") or ""
+                confirm_password = request.form.get("confirm_password") or ""
+                try:
+                    if not username or not password or not confirm_password:
+                        raise ValueError("Please complete all fields.")
+                    if len(username) < 2 or len(username) > 30:
+                        raise ValueError("Name must be between 2 and 30 characters.")
+                    if len(password) < 8:
+                        raise ValueError("Password must be at least 8 characters long.")
+                    if password != confirm_password:
+                        raise ValueError("Passwords do not match.")
+                    if not _developer_otp_delivery_configured():
+                        error = "Developer account verification is not configured on this server."
+                        response_status = 503
+                    else:
+                        db = get_db()
+                        previous_request = db.execute(
+                            "SELECT created_at FROM application_events "
+                            "WHERE event_type = ? ORDER BY id DESC LIMIT 1",
+                            ("developer_otp_requested",),
+                        ).fetchone()
+                        now = datetime.now(timezone.utc)
+                        if previous_request:
+                            previous_at = datetime.fromisoformat(
+                                previous_request["created_at"].replace("Z", "+00:00")
+                            )
+                            if now - previous_at < timedelta(seconds=60):
+                                error = "A verification code was requested recently. Please wait one minute and try again."
+                                response_status = 429
+                        if error is None:
+                            timestamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+                            challenge_id = secrets.token_urlsafe(24)
+                            code = f"{secrets.randbelow(1_000_000):06d}"
+                            db.execute(
+                                "INSERT INTO application_events "
+                                "(event_type, detail, endpoint, response_status, user_id, created_at) "
+                                "VALUES (?, ?, ?, ?, ?, ?)",
+                                (
+                                    "developer_otp_requested",
+                                    "Developer-account verification code requested",
+                                    request.endpoint,
+                                    None,
+                                    None,
+                                    timestamp,
+                                ),
+                            )
+                            db.execute(
+                                "INSERT INTO developer_signup_challenges "
+                                "(id, challenge_id, username, password_hash, otp_hash, expires_at, attempts, created_at) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                                "ON CONFLICT(id) DO UPDATE SET "
+                                "challenge_id = excluded.challenge_id, "
+                                "username = excluded.username, "
+                                "password_hash = excluded.password_hash, "
+                                "otp_hash = excluded.otp_hash, "
+                                "expires_at = excluded.expires_at, "
+                                "attempts = excluded.attempts, "
+                                "created_at = excluded.created_at",
+                                (
+                                    1,
+                                    challenge_id,
+                                    username,
+                                    generate_password_hash(password),
+                                    _developer_otp_digest(challenge_id, code),
+                                    int(now.timestamp()) + 600,
+                                    0,
+                                    timestamp,
+                                ),
+                            )
+                            db.commit()
+                            try:
+                                _send_developer_otp(code)
+                            except (urllib_error.URLError, TimeoutError, OSError, RuntimeError):
+                                current_app.logger.exception("Could not send developer-account verification code")
+                                db.execute(
+                                    "DELETE FROM developer_signup_challenges "
+                                    "WHERE id = ? AND challenge_id = ?",
+                                    (1, challenge_id),
+                                )
+                                db.commit()
+                                error = "The verification message could not be sent. Please try again later."
+                                response_status = 502
+                            else:
+                                session["developer_signup_challenge_id"] = challenge_id
+                                return redirect(url_for("developer_setup"))
+                except ValueError as exc:
+                    error = str(exc)
+                    response_status = 400
+
+        return render_template(
+            "developer_setup.html",
+            csrf_token=csrf_token,
+            error=error,
+            pending=bool(pending),
+            sms_configured=_developer_otp_delivery_configured() and schema_ready,
+            database_ready=schema_ready,
+        ), response_status
+
+    @app.route("/developer-setup/verify", methods=["POST"])
+    def verify_developer_setup():
+        if not _developer_setup_csrf_valid():
+            return "This verification request could not be verified. Reload the page and try again.", 400
+        if not _developer_account_schema_ready():
+            return "Developer setup is unavailable until the database migrations are applied.", 503
+
+        challenge_id = session.get("developer_signup_challenge_id")
+        db = get_db()
+        pending = None
+        if challenge_id:
+            pending = db.execute(
+                "SELECT challenge_id, username, password_hash, otp_hash, expires_at, attempts "
+                "FROM developer_signup_challenges WHERE id = ? AND challenge_id = ?",
+                (1, challenge_id),
+            ).fetchone()
+        now = int(datetime.now(timezone.utc).timestamp())
+        if pending is None:
+            session.pop("developer_signup_challenge_id", None)
+            return redirect(url_for("developer_setup"))
+        if now >= pending["expires_at"]:
+            db.execute(
+                "DELETE FROM developer_signup_challenges WHERE id = ? AND challenge_id = ?",
+                (1, challenge_id),
+            )
+            db.commit()
+            session.pop("developer_signup_challenge_id", None)
+            return redirect(url_for("developer_setup"))
+
+        code = (request.form.get("otp") or "").strip()
+        if not re.fullmatch(r"\d{6}", code) or not hmac.compare_digest(
+            pending["otp_hash"],
+            _developer_otp_digest(challenge_id, code),
+        ):
+            db.execute(
+                "UPDATE developer_signup_challenges SET attempts = attempts + 1 "
+                "WHERE id = ? AND challenge_id = ? AND attempts < 5",
+                (1, challenge_id),
+            )
+            updated = db.execute(
+                "SELECT attempts FROM developer_signup_challenges "
+                "WHERE id = ? AND challenge_id = ?",
+                (1, challenge_id),
+            ).fetchone()
+            if updated is None or updated["attempts"] >= 5:
+                db.execute(
+                    "DELETE FROM developer_signup_challenges WHERE id = ? AND challenge_id = ?",
+                    (1, challenge_id),
+                )
+                db.commit()
+                session.pop("developer_signup_challenge_id", None)
+                return render_template(
+                    "developer_setup.html",
+                    csrf_token=session["developer_setup_csrf"],
+                    error="Too many incorrect codes. Start a new setup and request another code.",
+                    pending=False,
+                    sms_configured=_developer_otp_delivery_configured(),
+                    database_ready=True,
+                ), 429
+            db.commit()
+            return render_template(
+                "developer_setup.html",
+                csrf_token=session["developer_setup_csrf"],
+                error="That verification code is incorrect or expired.",
+                pending=True,
+                sms_configured=_developer_otp_delivery_configured(),
+                database_ready=True,
+            ), 400
+
+        claimed = db.execute(
+            "DELETE FROM developer_signup_challenges "
+            "WHERE id = ? AND challenge_id = ? AND otp_hash = ? "
+            "AND expires_at > ? AND attempts < 5",
+            (1, challenge_id, pending["otp_hash"], now),
+        )
+        if claimed.rowcount != 1:
+            db.rollback()
+            session.pop("developer_signup_challenge_id", None)
+            return redirect(url_for("developer_setup"))
+
+        created_user = _register_user_with_password_hash(
+            pending["username"],
+            pending["password_hash"],
+            is_developer=True,
+        )
+        session.pop("developer_signup_challenge_id", None)
+        session.pop("developer_setup_csrf", None)
+        record_application_event(
+            "developer_account_created",
+            "Developer account created after phone verification",
+            endpoint=request.endpoint,
+            user_id=created_user["id"],
+        )
+        return redirect(url_for("developer_control_center"))
+
+    @app.route("/developer-setup/cancel", methods=["POST"])
+    def cancel_developer_setup():
+        if not _developer_setup_csrf_valid():
+            return "This setup request could not be verified. Reload the page and try again.", 400
+        challenge_id = session.pop("developer_signup_challenge_id", None)
+        if challenge_id and _developer_account_schema_ready():
+            db = get_db()
+            db.execute(
+                "DELETE FROM developer_signup_challenges WHERE id = ? AND challenge_id = ?",
+                (1, challenge_id),
+            )
+            db.commit()
+        return redirect(url_for("developer_setup"))
+
     @app.route("/developer", methods=["GET"])
     def developer_control_center():
         current_user = get_current_user()
@@ -3025,7 +3437,11 @@ def create_app(test_config=None):
             LIMIT 500
             """
         ).fetchall()
-        return jsonify([serialize_developer_user(row) for row in rows])
+        developer_user_ids = get_configured_developer_user_ids()
+        return jsonify([
+            serialize_developer_user(row, developer_user_ids)
+            for row in rows
+        ])
 
     @app.route("/api/developer/users/<int:user_id>", methods=["GET"])
     def api_developer_user(user_id):
@@ -3046,7 +3462,7 @@ def create_app(test_config=None):
         ).fetchone()
         if row is None:
             return jsonify({"error": "Account not found."}), 404
-        return jsonify(serialize_developer_user(row))
+        return jsonify(serialize_developer_user(row, get_configured_developer_user_ids()))
 
     @app.route("/api/developer/users/<int:user_id>/suspension", methods=["POST"])
     def api_developer_user_suspension(user_id):
@@ -3935,17 +4351,28 @@ def create_app(test_config=None):
             migrate_legacy_messages()
         elif app.config["DATABASE_BACKEND"] == "postgresql":
             try:
-                get_db().execute("SELECT 1").fetchone()
+                database_identity = _postgres_database_identity(get_db())
             except (RuntimeError, psycopg.Error, psycopg2.Error) as exc:
                 app.logger.exception("PostgreSQL connection check failed")
                 raise RuntimeError("Could not verify PostgreSQL connectivity during application startup.") from exc
+            app.logger.info(
+                "PostgreSQL database verified: endpoint=%s database=%s schema=%s search_path=%s "
+                "tls=%s users_table=%s conversation_messages_table=%s",
+                _postgres_endpoint_host(app.config["SQLALCHEMY_DATABASE_URI"]),
+                database_identity["database_name"],
+                database_identity["schema_name"],
+                database_identity["search_path"],
+                database_identity["tls_enabled"],
+                database_identity["users_table_present"],
+                database_identity["messages_table_present"],
+            )
 
         if app.config.get("APP_ENV") in {"production", "prod"}:
             developer_ids = get_configured_developer_user_ids()
             if not developer_ids:
                 app.logger.warning(
-                    "OPENCHAT_DEVELOPER_USER_ID is not configured with a valid user ID; "
-                    "developer control-center access is unavailable."
+                    "No developer accounts are configured yet; phone-verified setup is available at /developer-setup "
+                    "when SMS delivery is configured."
                 )
             else:
                 schema_ready = True
@@ -3980,6 +4407,48 @@ def create_app(test_config=None):
             "required columns, keys, indexes, foreign keys, and Alembic heads are present."
         )
 
+    @app.cli.command("diagnose-database")
+    @click.option("--username", help="Optionally check a test account without printing its username.")
+    def diagnose_database_command(username):
+        if app.config["DATABASE_BACKEND"] != "postgresql":
+            raise click.ClickException("Database diagnostics require the configured PostgreSQL backend.")
+
+        try:
+            db = get_db()
+            db.execute("BEGIN READ ONLY")
+            identity = _postgres_database_identity(db)
+            click.echo("backend=postgresql")
+            click.echo(
+                f"endpoint={_postgres_endpoint_host(app.config['SQLALCHEMY_DATABASE_URI'])}"
+            )
+            for name, value in identity.items():
+                click.echo(f"{name}={value}")
+
+            if username:
+                matching_users = db.execute(
+                    "SELECT id FROM users WHERE LOWER(username) = LOWER(?) LIMIT 2",
+                    (username.strip(),),
+                ).fetchall()
+                if len(matching_users) != 1:
+                    click.echo(f"account_matches={'2_or_more' if matching_users else 0}")
+                else:
+                    user_id = matching_users[0]["id"]
+                    memberships = db.execute(
+                        "SELECT COUNT(*) AS count FROM conversation_members WHERE user_id = ?",
+                        (user_id,),
+                    ).fetchone()["count"]
+                    sent_messages = db.execute(
+                        "SELECT COUNT(*) AS count FROM conversation_messages WHERE sender_id = ?",
+                        (user_id,),
+                    ).fetchone()["count"]
+                    click.echo("account_matches=1")
+                    click.echo(f"account_id={user_id}")
+                    click.echo(f"conversation_memberships={memberships}")
+                    click.echo(f"sent_messages={sent_messages}")
+        except (RuntimeError, psycopg.Error, psycopg2.Error) as exc:
+            app.logger.exception("PostgreSQL database diagnostics failed")
+            raise click.ClickException("Could not complete read-only PostgreSQL diagnostics.") from exc
+
     @app.cli.command("import-sqlite")
     @click.argument("source_path", type=click.Path(exists=True, dir_okay=False, readable=True))
     @click.option("--dry-run", is_flag=True, help="Report counts and collisions without importing rows.")
@@ -3991,52 +4460,46 @@ def create_app(test_config=None):
     def import_sqlite_command(source_path, dry_run, backup_dir):
         if app.config["DATABASE_BACKEND"] != "postgresql":
             raise click.ClickException("The import target must be PostgreSQL; set DATABASE_URL to its connection URL.")
-        backup_path = None
-        if not dry_run:
-            try:
-                backup_path = _create_sqlite_backup(source_path, backup_dir)
-            except (OSError, sqlite3.Error, RuntimeError) as exc:
-                raise click.ClickException(f"Could not create a verified SQLite source backup: {exc}") from exc
-        try:
-            report = _import_sqlite_data(source_path, get_db()._connection, dry_run=dry_run)
-        except (ValueError, sqlite3.Error) as exc:
-            message = str(exc)
-            if backup_path:
-                message += f" Source backup retained at: {backup_path}"
-            raise click.ClickException(message) from exc
-        except (psycopg.Error, psycopg2.Error) as exc:
-            app.logger.exception("SQLite-to-PostgreSQL import failed; the target transaction was rolled back")
-            backup_message = f" Source backup retained at: {backup_path}" if backup_path else ""
-            raise click.ClickException(
-                "The import failed and the target transaction was rolled back. "
-                "Check application logs." + backup_message
-            ) from exc
-        except RuntimeError as exc:
-            message = str(exc)
-            if backup_path:
-                message += f" Source backup retained at: {backup_path}"
-            raise click.ClickException(message) from exc
+        from scripts.migrate_sqlite_to_postgres import migrate as migrate_sqlite_snapshot
 
-        if backup_path:
-            report["source_backup"] = backup_path
+        report = migrate_sqlite_snapshot(
+            source_path,
+            orm_db.engine,
+            dry_run=dry_run,
+            backup_dir=backup_dir,
+        )
         click.echo("SQLite import dry-run report:" if dry_run else "SQLite import report:")
-        click.echo("table | source rows | target rows | duplicate source keys | target key collisions | verified rows")
-        for table_name, details in report["tables"].items():
+        for table_name, details in sorted(report["tables"].items()):
             click.echo(
-                f"{table_name} | {details['source_rows']} | {details['target_rows']} | "
-                f"{details['duplicate_source_keys'] or 0} | "
-                f"{details['target_key_collisions'] or 0} | {details['verified_rows']}"
+                f"{table_name} | source={details['source_rows']} | "
+                f"destination={details['destination_rows']} | "
+                f"inserted={details['inserted']} | "
+                f"identical_duplicates={details['duplicates']} | "
+                f"conflicts={details['conflicts']} | "
+                f"source_unique_conflicts={details['source_unique_conflicts']}"
+                + (f" | would_insert={details['would_insert']}" if dry_run else "")
             )
-        if report["unsupported_target_data"]:
-            click.echo("Non-empty target tables: " + ", ".join(report["unsupported_target_data"]))
-        if backup_path:
-            click.echo(f"Verified source backup: {backup_path}")
-        if not report["safe_to_import"]:
-            raise click.ClickException("Import stopped: resolve target data or key collisions; no rows were written.")
+            for conflict in details["conflict_examples"]:
+                click.echo(
+                    f"  conflict source_primary_key={conflict['source_primary_key']}, "
+                    f"collisions={conflict['collisions']}"
+                )
+        click.echo(f"Records inserted: {report['records_inserted']}")
+        click.echo(f"Identical records already present: {report['records_duplicate']}")
+        click.echo(f"Conflicting source records: {report['records_conflict']}")
+        if report["source_backup"]:
+            click.echo(f"Verified source backup: {report['source_backup']}")
+        if report["errors"]:
+            raise click.ClickException(report["errors"][0])
+        if report["records_conflict"]:
+            raise click.ClickException(
+                "Migration stopped: conflicting rows require review; no data was written."
+            )
         if dry_run:
-            click.echo("Dry run passed. No data was written.")
+            click.echo(f"New records that would be inserted: {report['would_insert']}")
+            click.echo("Dry run passed. No database was changed.")
         else:
-            click.echo("Import completed and all source/target row counts were verified.")
+            click.echo("Import completed and destination rows, values, and relationships were verified.")
 
     return app
 

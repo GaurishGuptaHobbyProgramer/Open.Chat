@@ -1,33 +1,57 @@
+import argparse
 import sqlite3
+from contextlib import closing
+from pathlib import Path
+from urllib.parse import quote
 
-DB_PATH = r"C:\Users\Gaurish Gupta\OneDrive\Desktop\OpenChat\chat.db"
 
-conn = sqlite3.connect(DB_PATH)
-cur = conn.cursor()
+def find_duplicate_user_groups(database_path):
+    database_path = Path(database_path).resolve()
+    if not database_path.is_file():
+        raise FileNotFoundError(f"SQLite database not found: {database_path}")
 
-cur.execute("SELECT id, username FROM users ORDER BY id")
-rows = cur.fetchall()
+    database_uri = "file:" + quote(str(database_path).replace("\\", "/")) + "?mode=ro"
+    with closing(sqlite3.connect(database_uri, uri=True)) as connection:
+        rows = connection.execute(
+            """
+            SELECT lower(trim(username)) AS normalized_username,
+                   group_concat(id) AS user_ids,
+                   COUNT(*) AS account_count
+            FROM users
+            WHERE username IS NOT NULL AND trim(username) != ''
+            GROUP BY lower(trim(username))
+            HAVING COUNT(*) > 1
+            ORDER BY lower(trim(username))
+            """
+        ).fetchall()
 
-seen_usernames = set()
-remove_ids = set()
+    return [
+        (normalized_username, sorted(int(user_id) for user_id in user_ids.split(",")), account_count)
+        for normalized_username, user_ids, account_count in rows
+    ]
 
-for user_id, username in rows:
-    normalized_username = (username or "").strip().lower()
-    if normalized_username and normalized_username in seen_usernames:
-        remove_ids.add(user_id)
-    else:
-        if normalized_username:
-            seen_usernames.add(normalized_username)
 
-if remove_ids:
-    placeholders = ", ".join("?" for _ in remove_ids)
-    cur.execute(f"DELETE FROM users WHERE id IN ({placeholders})", tuple(sorted(remove_ids)))
-    conn.commit()
-    print(f"Removed duplicate accounts: {len(remove_ids)}")
-else:
-    print("No duplicate accounts found.")
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Report duplicate normalized usernames without modifying the database."
+    )
+    parser.add_argument(
+        "--source",
+        default=str(Path(__file__).resolve().with_name("chat.db")),
+        help="Path to the SQLite database (default: chat.db beside this script).",
+    )
+    args = parser.parse_args(argv)
 
-cur.execute("SELECT COUNT(*) FROM users")
-print("Remaining users:", cur.fetchone()[0])
+    duplicate_groups = find_duplicate_user_groups(args.source)
+    if not duplicate_groups:
+        print("No duplicate usernames found. No database rows were changed.")
+        return 0
 
-conn.close()
+    print(f"Found {len(duplicate_groups)} duplicate username group(s); no rows were changed.")
+    for _, user_ids, account_count in duplicate_groups:
+        print(f"  accounts={account_count}, user_ids={','.join(map(str, user_ids))}")
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
