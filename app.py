@@ -337,6 +337,27 @@ _SQLITE_IMPORT_ID_TABLES = {
     "application_events",
 }
 
+_DATABASE_DIAGNOSTIC_COUNT_TABLES = (
+    "users",
+    "developer_accounts",
+    "developer_signup_challenges",
+    "messages",
+    "presence",
+    "user_settings",
+    "user_profiles",
+    "user_statuses",
+    "conversations",
+    "conversation_members",
+    "conversation_messages",
+    "conversation_read_state",
+    "conversation_typing",
+    "user_notifications",
+    "call_sessions",
+    "call_signals",
+    "application_events",
+    "enormous_space",
+)
+
 _SQLITE_IMPORT_UNIQUE_KEYS = {
     "users": (("id",),),
     "developer_accounts": (("user_id",),),
@@ -2145,16 +2166,14 @@ def get_user_conversations(user_id):
 
 
 
-def build_serial_username(display_name, db=None):
+def build_serial_username(display_name, user_id):
     clean_name = (display_name or "").strip()
     if len(clean_name) < 2:
         raise ValueError("Name must be at least 2 characters long.")
     if len(clean_name) > 30:
         raise ValueError("Name must be 30 characters or fewer.")
 
-    active_db = db or get_db()
-    serial_number = active_db.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM users").fetchone()[0]
-    return f"{serial_number}, {clean_name}"
+    return f"{user_id}, {clean_name}"
 
 
 def _register_user_with_password_hash(username, password_hash, is_developer=False):
@@ -2167,13 +2186,19 @@ def _register_user_with_password_hash(username, password_hash, is_developer=Fals
         raise ValueError("A password hash is required.")
 
     db = get_db()
-    generated_username = build_serial_username(clean_name, db)
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     try:
         cursor = db.execute(
             "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-            (generated_username, password_hash, timestamp),
+            (clean_name, password_hash, timestamp),
+        )
+        if cursor.lastrowid is None:
+            raise RuntimeError("The newly registered user ID could not be determined.")
+        generated_username = build_serial_username(clean_name, cursor.lastrowid)
+        db.execute(
+            "UPDATE users SET username = ? WHERE id = ?",
+            (generated_username, cursor.lastrowid),
         )
         if is_developer:
             db.execute(
@@ -4413,16 +4438,42 @@ def create_app(test_config=None):
         if app.config["DATABASE_BACKEND"] != "postgresql":
             raise click.ClickException("Database diagnostics require the configured PostgreSQL backend.")
 
+        connection_established = False
         try:
             db = get_db()
-            db.execute("BEGIN READ ONLY")
+            db.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
             identity = _postgres_database_identity(db)
-            click.echo("backend=postgresql")
+            click.echo("connection_status=connected")
+            connection_established = True
+            click.echo("database_engine=postgresql")
             click.echo(
                 f"endpoint={_postgres_endpoint_host(app.config['SQLALCHEMY_DATABASE_URI'])}"
             )
             for name, value in identity.items():
                 click.echo(f"{name}={value}")
+
+            available_tables = {
+                row["table_name"]
+                for row in db.execute(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = ANY(current_schemas(false)) "
+                    "AND table_type = 'BASE TABLE'"
+                ).fetchall()
+            }
+            required_table_count = len(_SQLITE_IMPORT_TABLES)
+            available_required_count = len(available_tables.intersection(_SQLITE_IMPORT_TABLES))
+            click.echo(
+                f"required_tables_available={available_required_count}/{required_table_count}"
+            )
+            for table_name in _SQLITE_IMPORT_TABLES:
+                available = table_name in available_tables
+                click.echo(f"table.{table_name}={'available' if available else 'missing'}")
+                if available and table_name in _DATABASE_DIAGNOSTIC_COUNT_TABLES:
+                    quoted_table = '"' + table_name.replace('"', '""') + '"'
+                    row_count = db.execute(
+                        f"SELECT COUNT(*) AS count FROM {quoted_table}"
+                    ).fetchone()["count"]
+                    click.echo(f"rows.{table_name}={row_count}")
 
             if username:
                 matching_users = db.execute(
@@ -4442,10 +4493,11 @@ def create_app(test_config=None):
                         (user_id,),
                     ).fetchone()["count"]
                     click.echo("account_matches=1")
-                    click.echo(f"account_id={user_id}")
                     click.echo(f"conversation_memberships={memberships}")
                     click.echo(f"sent_messages={sent_messages}")
         except (RuntimeError, psycopg.Error, psycopg2.Error) as exc:
+            status_name = "diagnostic_status" if connection_established else "connection_status"
+            click.echo(f"{status_name}=failed", err=True)
             app.logger.exception("PostgreSQL database diagnostics failed")
             raise click.ClickException("Could not complete read-only PostgreSQL diagnostics.") from exc
 

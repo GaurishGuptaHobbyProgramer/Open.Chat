@@ -14,4 +14,12 @@ if ! python -m flask --app app verify-schema; then
 fi
 
 echo "[startup] Starting Gunicorn."
-exec gunicorn --worker-class gthread --workers 1 --threads 4 wsgi:app
+# Render injects --preload; don't fork workers with an initialized PostgreSQL pool.
+unset GUNICORN_CMD_ARGS
+exec gunicorn \
+    --bind "0.0.0.0:${PORT:-10000}" \
+    --access-logfile - \
+    --worker-class gthread \
+    --workers 1 \
+    --threads 4 \
+    wsgi:app

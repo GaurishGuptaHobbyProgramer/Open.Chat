@@ -2024,6 +2024,19 @@ body.device-mobile .device-mode-toggle {
     color: var(--text);
 }
 
+.database-load-error {
+    padding: 10px 16px;
+    color: var(--error);
+    background: rgba(239, 68, 68, 0.1);
+    border-bottom: 1px solid rgba(239, 68, 68, 0.28);
+    font-size: 0.88rem;
+    line-height: 1.45;
+}
+
+.database-load-error[hidden] {
+    display: none !important;
+}
+
 .coming-soon-toast {
     position: fixed;
     top: 24px;

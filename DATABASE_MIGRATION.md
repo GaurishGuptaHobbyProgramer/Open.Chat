@@ -101,16 +101,22 @@ cannot silently select the ephemeral local `chat.db`.
 Application data access uses that selected backend; SQLite connections are
 limited to local development/tests and read-only migration source handling.
 The checked-in Render start script applies migrations, verifies the active
-schema, and starts one Gunicorn worker with four threads. Database writes for
-account creation and messages are explicitly committed. Connection failures
-raise errors; the application does not silently fall back to `chat.db`.
+schema, and starts one Gunicorn worker with four threads. The script clears
+Render's injected `GUNICORN_CMD_ARGS` (including `--preload`) and passes the
+port explicitly, so Gunicorn does not fork workers with a SQLAlchemy pool
+initialized in the parent process. Scaled instances use separate pools but
+the same service database URL. Database writes for account creation and
+messages are explicitly committed. Connection failures raise errors; the
+application does not silently fall back to `chat.db`.
 
 At startup, Render logs a sanitized PostgreSQL identity: endpoint hostname,
 database name, current schema, search path, TLS status, and whether the active
-search path resolves the users and conversation-message tables. The hostname
-helps distinguish Neon endpoints/branches; the connection URL and password
-are not logged. To inspect the running Render environment without changing
-data, open the service Shell and run:
+search path resolves the users and conversation-message tables. The
+read-only diagnostic also reports required-table availability and row counts
+for every required application table. The hostname helps distinguish Neon
+endpoints/branches; the connection URL and password are not logged. To inspect
+the running Render environment without changing data, open the service Shell
+and run:
 
 ```sh
 python -m flask --app app diagnose-database

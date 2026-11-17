@@ -43,6 +43,8 @@ const themeToggle = document.getElementById("theme-toggle");
 const deviceModeToggle = document.getElementById("device-mode-toggle");
 const chatSearch = document.getElementById("chat-search");
 const comingSoonToast = document.getElementById("coming-soon-toast");
+const databaseLoadError = document.getElementById("database-load-error");
+const databaseLoadFailures = new Map();
 const savedConvoId = sessionStorage.getItem("openchat-selected-conversation-id");
 let selectedConversationId = savedConvoId ? Number(savedConvoId) : 1;
 let selectedConversationName = "ENORMOUS";
@@ -877,6 +879,14 @@ let nextNotificationRefreshAt = 0;
 let nextTypingRefreshAt = 0;
 let nextPresenceRefreshAt = 0;
 
+function reportDatabaseLoadFailure(resource, message) {
+    if (!databaseLoadError) return;
+    if (message) databaseLoadFailures.set(resource, message);
+    else databaseLoadFailures.delete(resource);
+    databaseLoadError.textContent = Array.from(databaseLoadFailures.values()).join(" ");
+    databaseLoadError.hidden = databaseLoadFailures.size === 0;
+}
+
 function renderHistory(messages) {
     const nextSignature = JSON.stringify(messages || []);
     if (nextSignature === lastRenderedSignature) {
@@ -925,6 +935,12 @@ async function loadActiveConversationMessages(isInitial = false) {
         }
         const response = await fetch(url, { cache: "no-store" });
         if (!response.ok) {
+            reportDatabaseLoadFailure(
+                "messages",
+                response.status === 401
+                    ? "Please sign in again to view your saved messages."
+                    : `Message history could not be loaded (HTTP ${response.status}); it was not treated as empty.`,
+            );
             return;
         }
 
@@ -935,9 +951,14 @@ async function loadActiveConversationMessages(isInitial = false) {
 
         const messages = await response.json();
         if (!Array.isArray(messages)) {
+            reportDatabaseLoadFailure(
+                "messages",
+                "The server returned an invalid message history; existing messages were retained.",
+            );
             return;
         }
 
+        reportDatabaseLoadFailure("messages", null);
         if (isInitial || lastMessageId === null) {
             renderHistory(messages);
         } else if (messages.length > 0) {
@@ -945,6 +966,10 @@ async function loadActiveConversationMessages(isInitial = false) {
         }
     } catch (error) {
         console.error("Failed to load conversation messages:", error);
+        reportDatabaseLoadFailure(
+            "messages",
+            "Message history could not be loaded because the service is unavailable; it was not treated as empty.",
+        );
     }
 }
 
@@ -1219,13 +1244,24 @@ async function loadConversationList() {
     try {
         const response = await fetch("/api/conversations", { cache: "no-store" });
         if (!response.ok) {
+            reportDatabaseLoadFailure(
+                "conversations",
+                response.status === 401
+                    ? "Please sign in again to view your saved chats."
+                    : `Your chat list could not be loaded (HTTP ${response.status}); the existing list was retained.`,
+            );
             return;
         }
 
         const conversations = await response.json();
         if (!Array.isArray(conversations)) {
+            reportDatabaseLoadFailure(
+                "conversations",
+                "The server returned an invalid chat list; the existing list was retained.",
+            );
             return;
         }
+        reportDatabaseLoadFailure("conversations", null);
         conversationCache = conversations;
         const selectedConversation = conversations.find((item) => Number(item.conversation_id) === selectedConversationId);
         selectedOtherUserId = selectedConversation?.other_user_id || null;
@@ -1298,6 +1334,10 @@ async function loadConversationList() {
         });
     } catch (error) {
         console.error("Failed to load conversations:", error);
+        reportDatabaseLoadFailure(
+            "conversations",
+            "Your chat list could not be loaded because the service is unavailable; the existing list was retained.",
+        );
     }
 }
 

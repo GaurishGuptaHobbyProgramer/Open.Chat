@@ -64,6 +64,13 @@ starting. Review each migration before deployment and keep it
 additive/data-preserving. Confirm the Render dashboard has not overridden the
 Blueprint start command.
 
+The start script clears Render's injected `GUNICORN_CMD_ARGS` (which includes
+`--preload`) and supplies the bind port and access log explicitly. This keeps
+Gunicorn from forking workers with an already-created SQLAlchemy connection
+pool. The configured worker uses four threads and a per-process bounded pool;
+additional Render instances use the same service `DATABASE_URL` and have
+separate pools.
+
 The initial migration creates the `users` table. If it is absent in a live
 service, the deployed process likely bypassed the checked-in startup path, is
 using a different database/schema, or has Alembic-history/schema drift. Check
